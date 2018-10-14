@@ -71,9 +71,10 @@ parser.add_argument('--memory-size', type=int, default=10000,
 parser.add_argument('--learning-starts', type=int, default=10000,
                     help='learning starts after - 10,000 transitions')
 
-parser.add_argument('--use-double-dqn',         action='store_false', default=True,
+parser.add_argument('--use-double-dqn',         action='store_true', default=False,
                     help='use-double-dqn')
-parser.add_argument('--use-prioritized-buffer', action='store_false', default=True,
+
+parser.add_argument('--use-prioritized-buffer', action='store_true', default=False,
                     help='use-prioritized replay buffer')
 
 args = parser.parse_args()
@@ -260,6 +261,7 @@ def PER_pre_fill_memory(envs):
             memory.push(st_0, action, st_1, reward)      
         state = next_state  
         print_now('Pre-filling Replay Memory %d / %d -- action: %d' % (j+1, args.memory_size, action.item()))
+    return state
     #
 
 # main
@@ -274,7 +276,7 @@ def main():
     episode_rewards = deque(maxlen=100)
     # -------------------------------------------------------------------######
     if PRIORITIZED_MEMORY:
-        PER_pre_fill_memory(envs) # reset would be called inside
+        state = PER_pre_fill_memory(envs) # reset would be called inside
     else:
         state = envs.reset()
     # -------------------------------------------------------------------######    

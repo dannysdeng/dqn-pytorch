@@ -1,5 +1,6 @@
 from collections import namedtuple
 import random
+import numpy as np
 from utils import SumTree
 
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
@@ -25,13 +26,13 @@ class ReplayMemory(object):
 
 class PrioritizedReplayBuffer():
     # Remember to deal with EMPTY MEMORY PROBLEM by pre-filling the prioritized memory with Random (St0, At0, St1, Rt0)
-    def __init__(self, args, capacity, beta):
+    def __init__(self, capacity):
         self.capacity = capacity
         # We may want better data structure: https://jaromiru.com/2016/11/07/lets-make-a-dqn-double-learning-and-prioritized-experience-replay/
         self.memory   = SumTree(capacity) 
 
         self.e     = 0.01
-        self.alpha = 0.6 # tradeoff between taking only experience with high-priority samples
+        self.alpha = 0.5 # tradeoff between taking only experience with high-priority samples
         self.beta  = 0.4 # Importance Sampling, from 0.4 -> 1.0 over the course of training
         self.beta_increment = 0.001
         self.abs_error_clipUpper = 1.0
@@ -40,7 +41,7 @@ class PrioritizedReplayBuffer():
         # Find the max priority. Recall that treeArr is of size 2*capacity - 1. 
         # And all the priorioties lie on the leaves of the tree
         all_priority = self.memory.treeArr[-self.memory.capacity:]
-        max_priority = np.max(max_priority)
+        max_priority = np.max(all_priority)
         if max_priority == 0:
             max_priority = self.abs_error_clipUpper
         # Setting maximum priority for new transitions. Total priority will be updated
@@ -57,6 +58,7 @@ class PrioritizedReplayBuffer():
                 the transitions with (priority score == sampled values) are retrieved
         4. Finally, calculate Importance Sampling weight, W_is, for each of the element in the minibatch
         """
+        n = batch_size
         this_batch = []
         batch_index     = np.empty((n,  ), dtype=np.int32)
         batch_weight_IS = np.empty((n, 1), dtype=np.float32)
@@ -72,9 +74,12 @@ class PrioritizedReplayBuffer():
         all_priority = self.memory.treeArr[-self.memory.capacity:]
         prob_min     = min(all_priority) / total_priority
         """
-             [     prob_min * n ]^(-beta)             [   1      1        ]^(beta)
+        N is the batch size
+
+             [     prob_min * N ]^(-beta)             [   1      1        ]^(beta)
              |------------------|             --->    |  --- * -----------|
              [          1       ]                     [   N     prob_min  ]
+
         """
         # Getting the MAX of importance sampling weight for nomalization
         max_weight   = (prob_min * n)**(-self.beta)
@@ -106,7 +111,7 @@ class PrioritizedReplayBuffer():
             this_batch.append(transition)
         return this_batch, batch_index, batch_weight_IS
 
-    def update_priority_on_tree_for_a_batch(self, tree_idx, abs_TD_error):
+    def update_priority_on_tree(self, tree_idx, abs_TD_errors):
         """ 
             A bunch of tree indices and a bunch of TD_errors
         """
@@ -116,16 +121,3 @@ class PrioritizedReplayBuffer():
         for index, prob in zip(tree_idx, pt_alpha):
             self.memory.update(index, prob)
     # Remember to deal with EMPTY MEMORY PROBLEM
-
-
-
-
-
-
-
-
-
-
-
-
-
