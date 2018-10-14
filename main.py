@@ -91,6 +91,7 @@ lr = 1e-4
 # Q-Learning Parameters
 DOUBLE_Q_LEARNING  = args.use_double_dqn         #False
 PRIORITIZED_MEMORY = args.use_prioritized_buffer #False
+N_STEP_LOOK_AHEAD  = args.use_n_step
 
 # Booking Keeping
 print_now('------- Begin DQN with --------')
@@ -146,6 +147,13 @@ if PRIORITIZED_MEMORY:
     memory    = PrioritizedReplayBuffer(args.memory_size)
 else:
     memory    = ReplayMemory(args.memory_size)
+
+# myList_look_ahead = []
+# if done or len(myList_look_ahead < 3):
+#     transision = st_0, action, None, reward
+# elif done:
+#     self.
+
 # -------------------------------------------------------------------######
 
 
@@ -199,8 +207,8 @@ def optimize_model():
         # See https://medium.freecodecamp.org/improvements-in-deep-q-learning-dueling-double-dqn-prioritized-experience-replay-and-fixed-58b130cc5682
         with torch.no_grad():
             target_Q_sa             = target_net(non_final_next_states)
-            action_from_policy_Q_sa = policy_net(non_final_next_states).max(1)[1]  # max of the first dimension --> tuple(val, index). 
-            Q_sa_double_DQN = target_Q_sa[0][action_from_policy_Q_sa].unsqueeze(1) # We use the action index from policy net
+            action_from_policy_Q_sa = policy_net(non_final_next_states).max(1)[1].unsqueeze(1)  # max of the first dimension --> tuple(val, index). 
+            Q_sa_double_DQN = target_Q_sa.gather(1, action_from_policy_Q_sa)                    # We use the action index from policy net
             next_Q_sa[non_final_mask] = Q_sa_double_DQN
     else:
         # Vanilla DQN, getting action from target_net
