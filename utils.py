@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 import numpy as np
+import math
 
 def init(module, weight_init, bias_init, gain=1):
     weight_init(module.weight.data, gain=gain)
@@ -106,16 +107,16 @@ class SumTree(object):
             left_child_index = 2 * parent_index + 1
             right_child_index = left_child_index + 1
             #
+            # If we reach bottom, end the search
             if left_child_index >= len(self.treeArr):
                 LEAF_index = parent_index
                 break
-            else:
+            else: # downward search, always search for a higher priority node
                 if v <= self.treeArr[left_child_index]:
                     parent_index = left_child_index
                 else:
                     v -= self.treeArr[left_child_index]
                     parent_index = right_child_index
-                #
             #
         # The corresponding data index: 
         data_index = LEAF_index - self.capacity + 1

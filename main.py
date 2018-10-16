@@ -1,3 +1,6 @@
+"""
+Great tutorial: https://github.com/qfettes/DeepRL-Tutorials
+"""
 import copy
 import glob
 import os
@@ -64,18 +67,32 @@ parser.add_argument('--batch-size', type=int, default=32,
                     help='batch size in DQN (default: 32)')
 parser.add_argument('--train-freq', type=int, default=4,
                     help='frequency in DQN training. Every 4 frames')
-parser.add_argument('--target-update', type=int, default=1000,
+parser.add_argument('--target-update', type=int, default=32000,
                     help='frequency in target-network update. Every 1000 steps')
-parser.add_argument('--memory-size', type=int, default=10000,
+parser.add_argument('--memory-size', type=int, default=1000000,
                     help='memory size - 10,000 transitions')
-parser.add_argument('--learning-starts', type=int, default=10000,
-                    help='learning starts after - 10,000 transitions')
+parser.add_argument('--learning-starts', type=int, default=80000,
+                    help='learning starts after - 80,000 transitions')
+parser.add_argument('--num-lookahead', type=int, default=3,
+                    help='look ahead step - 3 transitions')
 
 parser.add_argument('--use-double-dqn',         action='store_true', default=False,
                     help='use-double-dqn')
 
 parser.add_argument('--use-prioritized-buffer', action='store_true', default=False,
                     help='use-prioritized replay buffer')
+
+parser.add_argument('--use-n-step', action='store_true', default=False,
+                    help='use-prioritized replay buffer')
+
+parser.add_argument('--use-duel', action='store_true', default=False,
+                    help='use dueling architecture')
+
+parser.add_argument('--use-noisy-net', action='store_true', default=False,
+                    help='use dueling architecture')
+
+
+
 
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
@@ -87,18 +104,25 @@ TARGET_UPDATE         = args.target_update #
 exploration_fraction    = 0.1
 exploration_final_eps_1 = 0.1
 exploration_final_eps_2 = 0.01
-lr = 1e-4
+lr = 6.25e-4
 # Q-Learning Parameters
 DOUBLE_Q_LEARNING  = args.use_double_dqn         #False
 PRIORITIZED_MEMORY = args.use_prioritized_buffer #False
-N_STEP_LOOK_AHEAD  = args.use_n_step
+USE_N_STEP         = args.use_n_step
+NUM_LOOKAHEAD      = args.num_lookahead
+USE_DUEL           = args.use_duel
+USE_NOISY_NET      = args.use_noisy_net
 
 # Booking Keeping
 print_now('------- Begin DQN with --------')
-print_now('Using Double DQN: {}'.format(DOUBLE_Q_LEARNING))
-print_now('Using Prioritized buffer: {}'.format(PRIORITIZED_MEMORY))
+print_now('Using Double DQN:                {}'.format(DOUBLE_Q_LEARNING))
+print_now('Using Prioritized buffer:        {}'.format(PRIORITIZED_MEMORY))
+print_now('Using N-step reward with N = {}:  {}'.format(NUM_LOOKAHEAD, USE_N_STEP))
+print_now('Using Duel (advantage):          {}'.format(USE_DUEL))
+print_now('Using Noisy Net:                 {}'.format(USE_NOISY_NET))
 print_now('Seed: {}'.format(args.seed))
 print_now('------- -------------- --------')
+print_now('Task: {}'.format(args.env_name))
 time.sleep(0.1)
 
 
@@ -135,24 +159,49 @@ envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                     args.gamma, args.log_dir, args.add_timestep, device, False)
 
 action_space = envs.action_space.n
-policy_net = DQN(num_inputs=4, num_actions=action_space).to(device)
-target_net = DQN(num_inputs=4, num_actions=action_space).to(device)
+policy_net = DQN(num_inputs=4, num_actions=action_space, use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET).to(device)
+target_net = DQN(num_inputs=4, num_actions=action_space, use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET).to(device)
 target_net.load_state_dict(policy_net.state_dict())
 policy_net.train()
 target_net.eval()
-
-optimizer = optim.Adam(policy_net.parameters(), lr=lr)
+Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
+optimizer = optim.Adam(policy_net.parameters(), lr=lr, eps=1.5e-4)
 # -------------------------------------------------------------------######
 if PRIORITIZED_MEMORY:
-    memory    = PrioritizedReplayBuffer(args.memory_size)
+    memory    = PrioritizedReplayBuffer(args.memory_size, args.total_timestep, args.learning_starts)
 else:
     memory    = ReplayMemory(args.memory_size)
 
-# myList_look_ahead = []
-# if done or len(myList_look_ahead < 3):
-#     transision = st_0, action, None, reward
-# elif done:
-#     self.
+nstep_buffer = []
+def n_step_preprocess(st_0, action, st_1, reward, done):
+    transition = Transition(st_0, action, st_1, reward)
+    if done:
+        # Clear out the buffer
+        while len(nstep_buffer) > 1:
+            n_step_reward = sum([nstep_buffer[i].reward.item()*(GAMMA**i) for i in range(len(nstep_buffer))])
+            prev_transition = nstep_buffer.pop(0)
+            temp_st0    = prev_transition.state
+            temp_action = prev_transition.action
+            temp_reward = torch.tensor([[n_step_reward]], dtype=torch.float)
+            memory.push(temp_st0, temp_action, None, temp_reward)
+        #
+        n_step_reward   = sum([nstep_buffer[i].reward.item()*(GAMMA**i) for i in range(len(nstep_buffer))])
+        prev_transition = nstep_buffer.pop(0)
+        assert(len(nstep_buffer) == 0)
+        return prev_transition.state, prev_transition.action, None, torch.tensor([[n_step_reward]], dtype=torch.float)
+
+    elif len(nstep_buffer) < NUM_LOOKAHEAD - 1:
+        nstep_buffer.append(transition)
+        return None, None, None, None #st_0, action, st_1, reward
+    else:
+        nstep_buffer.append(transition)
+        n_step_reward   = sum([nstep_buffer[i].reward.item()*(GAMMA**i) for i in range(NUM_LOOKAHEAD)])
+        prev_transition = nstep_buffer.pop(0)
+        # return prev_st0, prev_action, st_1, torch.tensor([[n_step_reward]], dtype=torch.float).to(device)
+        assert(len(nstep_buffer) < NUM_LOOKAHEAD)
+        return prev_transition.state, prev_transition.action, st_1, torch.tensor([[n_step_reward]], dtype=torch.float)
+    #
+
 
 # -------------------------------------------------------------------######
 
@@ -173,7 +222,7 @@ def select_action(state, action_space):
     # eps_threshold = EPS_END + (EPS_STRAT-EPS_END) * math.exp(-1*steps_done / EPS_DECAY)
     eps_threshold = eps_schedule1.value(steps_done) if steps_done <= 1e6 else eps_schedule2.value(steps_done)
     steps_done += 1
-    if random.random() > eps_threshold:
+    if USE_NOISY_NET or random.random() > eps_threshold:
         with torch.no_grad():
             y = policy_net(state)
             y = y.max(1) # (tensor([0.2177], grad_fn=<MaxBackward0>), tensor([0]))
@@ -183,7 +232,6 @@ def select_action(state, action_space):
     return action
 
 # optimize
-Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 def optimize_model():
     # print_now('in optimize_model, device = {}'.format(device))
     if PRIORITIZED_MEMORY:
@@ -194,10 +242,10 @@ def optimize_model():
     batch       = Transition(*zip(*transitions))
     non_final             = tuple(map(lambda s: s is not None,  batch.next_state))
     non_final_mask        = torch.tensor(non_final, device=device, dtype=torch.uint8)
-    non_final_next_states = torch.cat([s for s in batch.next_state if s is not None])
+    non_final_next_states = torch.cat([s for s in batch.next_state if s is not None]).to(device)
     #
-    state_batch           = torch.cat(batch.state)
-    action_batch          = torch.cat(batch.action)
+    state_batch           = torch.cat(batch.state).to(device)
+    action_batch          = torch.cat(batch.action).to(device)
     reward_batch          = torch.cat(batch.reward).to(device)
     #
     Q_sa          = policy_net(state_batch).gather(1, action_batch)
@@ -263,12 +311,17 @@ def PER_pre_fill_memory(envs):
         next_state, reward, done, info = envs.step(action)
         st_1 = copy.deepcopy(next_state)
         # We only ensure one environment here
+        # -------------------------------------------------------------------######    
+        if USE_N_STEP:
+            st_0, action, st_1, reward = n_step_preprocess(st_0, action, st_1, reward, done[0])
+        # -------------------------------------------------------------------######    
         if done[0]:
             memory.push(st_0, action, None, reward)
-        else:
+            print_now('Pre-filling Replay Memory %d / %d -- action: %d' % (j+1, args.memory_size, action.item()))
+        elif st_0 is not None:
             memory.push(st_0, action, st_1, reward)      
+            print_now('Pre-filling Replay Memory %d / %d -- action: %d' % (j+1, args.memory_size, action.item()))
         state = next_state  
-        print_now('Pre-filling Replay Memory %d / %d -- action: %d' % (j+1, args.memory_size, action.item()))
     return state
     #
 
@@ -283,10 +336,11 @@ def main():
     action_history  = deque(maxlen=1000)
     episode_rewards = deque(maxlen=100)
     # -------------------------------------------------------------------######
-    if PRIORITIZED_MEMORY:
-        state = PER_pre_fill_memory(envs) # reset would be called inside
-    else:
-        state = envs.reset()
+    # if PRIORITIZED_MEMORY:
+    #     state = PER_pre_fill_memory(envs) # reset would be called inside
+    # else:
+    #     state = envs.reset()
+    state = envs.reset()
     # -------------------------------------------------------------------######    
     start = time.time()
     for t in range(int(args.total_timestep)):
@@ -299,9 +353,13 @@ def main():
         if 'episode' in info[0].keys():
             episode_rewards.append(info[0]['episode']['r'])
         # We only ensure one environment here
+        # -------------------------------------------------------------------######    
+        if USE_N_STEP:
+            st_0, action, st_1, reward = n_step_preprocess(st_0, action, st_1, reward, done[0])
+        # -------------------------------------------------------------------######        
         if done[0]:
             memory.push(st_0, action, None, reward)
-        else:
+        elif st_0 is not None:
             memory.push(st_0, action, st_1, reward)
         state = next_state
         #

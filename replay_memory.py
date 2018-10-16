@@ -26,26 +26,33 @@ class ReplayMemory(object):
 
 class PrioritizedReplayBuffer():
     # Remember to deal with EMPTY MEMORY PROBLEM by pre-filling the prioritized memory with Random (St0, At0, St1, Rt0)
-    def __init__(self, capacity):
+    def __init__(self, capacity, T_max, learn_start):
         self.capacity = capacity
+        self.count    = 0
         # We may want better data structure: https://jaromiru.com/2016/11/07/lets-make-a-dqn-double-learning-and-prioritized-experience-replay/
         self.memory   = SumTree(capacity) 
 
         self.e     = 0.01
         self.alpha = 0.5 # tradeoff between taking only experience with high-priority samples
         self.beta  = 0.4 # Importance Sampling, from 0.4 -> 1.0 over the course of training
-        self.beta_increment = 0.001
+        self.beta_increment = (1 - self.beta) / (T_max - learn_start)
         self.abs_error_clipUpper = 1.0
+        self.NORMALIZE_BY_BATCH = False # In openAI baseline, normalize by whole
 
-    def push(self, *args):      
+    def push(self, state, action, next_state, reward):      
         # Find the max priority. Recall that treeArr is of size 2*capacity - 1. 
         # And all the priorioties lie on the leaves of the tree
-        all_priority = self.memory.treeArr[-self.memory.capacity:]
+        self.count += 1
+        self.count = max(self.count, self.capacity)
+        all_priority = self.memory.treeArr[-self.memory.capacity:][:self.count]
         max_priority = np.max(all_priority)
         if max_priority == 0:
             max_priority = self.abs_error_clipUpper
         # Setting maximum priority for new transitions. Total priority will be updated
-        transition = Transition(*args)
+        if next_state is not None:
+            transition = Transition(state.cpu(), action.cpu(), next_state.cpu(), reward.cpu())
+        else:
+            transition = Transition(state.cpu(), action.cpu(), None, reward.cpu())
         self.memory.push(max_priority, transition) 
 
     def sample(self, batch_size):
@@ -60,8 +67,8 @@ class PrioritizedReplayBuffer():
         """
         n = batch_size
         this_batch = []
-        batch_index     = np.empty((n,  ), dtype=np.int32)
-        batch_weight_IS = np.empty((n, 1), dtype=np.float32)
+        batch_index     = [] # np.empty((n,  ), dtype=np.int32)
+        batch_weight_IS = [] # np.empty((n, 1), dtype=np.float32)
 
         # Calculate the priority segment by dividing the ranges
         total_priority = self.memory.get_total_priority()
@@ -71,7 +78,7 @@ class PrioritizedReplayBuffer():
         self.beta = min(self.beta + self.beta_increment, 1.0)
 
         # Calculate the max_weight
-        all_priority = self.memory.treeArr[-self.memory.capacity:]
+        all_priority = self.memory.treeArr[-self.memory.capacity:][:self.count]
         prob_min     = min(all_priority) / total_priority
         """
         N is the batch size
@@ -82,7 +89,8 @@ class PrioritizedReplayBuffer():
 
         """
         # Getting the MAX of importance sampling weight for nomalization
-        max_weight   = (prob_min * n)**(-self.beta)
+        max_weight_ALL_memory   = (prob_min * n)**(-self.beta)
+        max_weight_THIS_BATCH   = -1
         # 
         for i in range(batch_size):
             # A value is sample from each range
@@ -104,11 +112,23 @@ class PrioritizedReplayBuffer():
                      [   N     prob_min  ]                
             """
             this_weight_IS = (stochastic_p * n) ** (-self.beta)
-            this_weight_IS /= max_weight # Normalize the max priority
 
-            batch_weight_IS[i, 0] = this_weight_IS
-            batch_index[i]        = index
-            this_batch.append(transition)
+            if self.NORMALIZE_BY_BATCH and max_weight_THIS_BATCH <= this_weight_IS:
+                max_weight_THIS_BATCH = this_weight_IS
+
+            # List append
+            batch_weight_IS += this_weight_IS, # batch_weight_IS[i, 0] = this_weight_IS
+            batch_index     += index,          #batch_index[i]        = index
+            this_batch      += transition,
+        #
+        batch_weight_IS = np.asarray(batch_weight_IS).T # --> make it 32 x 1
+        batch_index     = np.asarray(batch_index)
+        # ------------------------------------------------------------------- #
+        if self.NORMALIZE_BY_BATCH:
+            batch_weight_IS /= max_weight_THIS_BATCH # Kaixin from Berkeley
+        else:
+            batch_weight_IS /= max_weight_ALL_memory # OpenAI Baseline
+        # ------------------------------------------------------------------- #
         return this_batch, batch_index, batch_weight_IS
 
     def update_priority_on_tree(self, tree_idx, abs_TD_errors):
