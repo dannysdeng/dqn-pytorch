@@ -451,6 +451,7 @@ def optimize_model():
         if PRIORITIZED_MEMORY:
             diff = Q_sa - Expected_Q_sa
             loss = huber_loss(diff).squeeze() * batch_weight_IS
+            loss.mean()
         else:
             loss = F.smooth_l1_loss(Q_sa, Expected_Q_sa)
     # -------------------------------------------------------------------######
