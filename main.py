@@ -107,10 +107,6 @@ BATCH_SIZE    = args.batch_size
 TRAIN_FREQ    = args.train_freq
 TARGET_UPDATE         = args.target_update #
 
-exploration_fraction    = 0.1
-exploration_final_eps_1 = 0.1
-exploration_final_eps_2 = 0.01
-lr = 6.25e-4
 # Q-Learning Parameters
 DOUBLE_Q_LEARNING  = args.use_double_dqn         #False
 PRIORITIZED_MEMORY = args.use_prioritized_buffer #False
@@ -125,7 +121,13 @@ if USE_QR_C51:
 
 if not USE_N_STEP:
     NUM_LOOKAHEAD = 1
-
+# --------------------------------------------------- #
+exploration_fraction    = 0.1
+exploration_final_eps_1 = 0.1
+exploration_final_eps_2 = 0.01
+adam_lr =  6.25e-4 # 5e-5     if USE_QR_C51 else 
+adam_eps = 1.5e-4 # 3.125e-4 if USE_QR_C51 else 
+# --------------------------------------------------- #
 # Booking Keeping
 print_now('------- Begin DQN with --------')
 print_now('Using Double DQN:                {}'.format(DOUBLE_Q_LEARNING))
@@ -135,6 +137,7 @@ print_now('Using Duel (advantage):          {}'.format(USE_DUEL))
 print_now('Using Noisy Net:                 {}'.format(USE_NOISY_NET))
 print_now('Using C51                        {}'.format(USE_C51))
 print_now('Using Quantile Regression C51:   {}'.format(USE_QR_C51))
+print_now('Adam learning rate: {}, eps: {}'.format(adam_lr, adam_eps))
 print_now('Seed: {}'.format(args.seed))
 print_now('------- -------------- --------')
 print_now('Task: {}'.format(args.env_name))
@@ -186,7 +189,7 @@ target_net.load_state_dict(policy_net.state_dict())
 policy_net.train()
 target_net.eval()
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
-optimizer = optim.Adam(policy_net.parameters(), lr=lr, eps=1.5e-4)
+optimizer = optim.Adam(policy_net.parameters(), lr=adam_lr, eps=adam_eps)
 # -------------------------------------------------------------------######
 if PRIORITIZED_MEMORY:
     memory    = PrioritizedReplayBuffer(args.memory_size, args.total_timestep, args.learning_starts)
@@ -356,6 +359,7 @@ def select_action(state, action_space):
 # optimize
 def optimize_model():
     #
+    # F.smooth_l1_loss(x, x.zero())
     def huber_loss(x):
         cond = (x.abs() < 1.0).float().detach()
         return 0.5 * x.pow(2) * cond + (x.abs() - 0.5) * (1.0 - cond)
@@ -377,6 +381,7 @@ def optimize_model():
     state_batch           = torch.cat(batch.state).to(device)
     action_batch          = torch.cat(batch.action).to(device) # this is of shape [32 x 1]
     reward_batch          = torch.cat(batch.reward).to(device)
+    batch_weight_IS       = torch.tensor(batch_weight_IS).to(device) # [32,]
     #
     if USE_QR_C51:
         QR_C51_action = action_batch.unsqueeze(dim=-1).expand(-1, -1, QR_C51_atoms)
@@ -393,10 +398,13 @@ def optimize_model():
         #              [51 x 32 x 1 ]                [1, 32, 51]
         diff = quantiles_next.t().unsqueeze(-1) - quantiles.unsqueeze(0) # diff is of shape [51, 32 51]
         loss = huber_loss(diff) * torch.abs( QR_C51_cum_density.view(1, -1) - (diff < 0).to(torch.float) )
+
         # loss is now of shape [51, 32, 51]
         loss = loss.transpose(0,1) # loss is now of shape [32, 51, 51]
+        if PRIORITIZED_MEMORY:
+            loss = loss * batch_weight_IS.view(BATCH_SIZE, 1, 1)            
         loss = loss.mean(1).sum(-1)
-        loss_PER = loss.detach().squeeze().abs().cpu().numpy()
+        loss_PER = loss.detach().squeeze().abs().cpu().numpy()    
         loss = loss.mean()
         #
         ds = y.detach() * QR_C51_quantile_weight
@@ -411,8 +419,10 @@ def optimize_model():
         y = policy_net(state_batch)
         current_dist = y.gather(1, C51_action).squeeze()
         target_prob  = project_distribution(state_batch, C51_action, non_final_next_states, C51_reward, non_final_mask) # torch.Size([32, 51])
-        loss = -(target_prob * current_dist.log()).sum(-1)
+        loss = -(target_prob * current_dist.log()).sum(-1) # KL Divergence
         loss_PER = loss.detach().squeeze().abs().cpu().numpy()
+        if PRIORITIZED_MEMORY:
+            loss = loss * batch_weight_IS.view(BATCH_SIZE, 1)
         loss = loss.mean()
         #
         ds = y.detach() * C51_support
@@ -438,7 +448,11 @@ def optimize_model():
 
         Expected_Q_sa = reward_batch + ((GAMMA**NUM_LOOKAHEAD) * next_Q_sa)
         #
-        loss = F.smooth_l1_loss(Q_sa, Expected_Q_sa)
+        if PRIORITIZED_MEMORY:
+            diff = Q_sa - Expected_Q_sa
+            loss = huber_loss(diff).squeeze() * batch_weight_IS
+        else:
+            loss = F.smooth_l1_loss(Q_sa, Expected_Q_sa)
     # -------------------------------------------------------------------######
     if PRIORITIZED_MEMORY:
         if USE_C51 or USE_QR_C51:
