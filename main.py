@@ -401,10 +401,10 @@ def optimize_model():
 
         # loss is now of shape [51, 32, 51]
         loss = loss.transpose(0,1) # loss is now of shape [32, 51, 51]
+        loss_PER = loss.detach().mean(1).sum(-1).abs().cpu().numpy()
         if PRIORITIZED_MEMORY:
             loss = loss * batch_weight_IS.view(BATCH_SIZE, 1, 1)            
         loss = loss.mean(1).sum(-1)
-        loss_PER = loss.detach().squeeze().abs().cpu().numpy()    
         loss = loss.mean()
         #
         ds = y.detach() * QR_C51_quantile_weight
@@ -452,6 +452,10 @@ def optimize_model():
             diff = Q_sa - Expected_Q_sa
             loss = huber_loss(diff) * batch_weight_IS.view(BATCH_SIZE, 1)
             loss = loss.mean()
+            #
+            TD_error = Q_sa.detach() - Expected_Q_sa.detach()
+            TD_error = TD_error.cpu().numpy().squeeze()
+            abs_TD_error = abs(TD_error)
         else:
             loss = F.smooth_l1_loss(Q_sa, Expected_Q_sa)
     # -------------------------------------------------------------------######
@@ -459,9 +463,6 @@ def optimize_model():
         if USE_C51 or USE_QR_C51:
             memory.update_priority_on_tree(batch_index, loss_PER)
         else:
-            TD_error = Q_sa.detach() - Expected_Q_sa.detach()
-            TD_error = TD_error.cpu().numpy().squeeze()
-            abs_TD_error = abs(TD_error)
             memory.update_priority_on_tree(batch_index, abs_TD_error)
     # -------------------------------------------------------------------######
     optimizer.zero_grad()
