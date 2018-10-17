@@ -430,24 +430,27 @@ def optimize_model():
         Q_sa = ds.sum(dim=2).gather(1, action_batch)
     else:
     #   # Normal DQN. Minimize expected TD error ------------------------######
+        if USE_NOISY_NET:
+            policy_net.sample_noise()        
         Q_sa          = policy_net(state_batch).gather(1, action_batch)
         next_Q_sa     = torch.zeros((BATCH_SIZE, 1), device=device)
         if DOUBLE_Q_LEARNING:
             # Double DQN, getting action from policy net. 
             # See https://medium.freecodecamp.org/improvements-in-deep-q-learning-dueling-double-dqn-prioritized-experience-replay-and-fixed-58b130cc5682
-            with torch.no_grad():
+            with torch.no_grad(): 
+                # Get action, no noisy in policy net
                 if USE_NOISY_NET:
-                    policy_net.sample_noise()    
-                    target_net.sample_noise()                
+                    target_net.sample_noise()                     
                 target_Q_sa             = target_net(non_final_next_states)
                 action_from_policy_Q_sa = policy_net(non_final_next_states).max(1)[1].unsqueeze(1)  # max of the first dimension --> tuple(val, index). 
                 Q_sa_double_DQN = target_Q_sa.gather(1, action_from_policy_Q_sa)                    # We use the action index from policy net
                 next_Q_sa[non_final_mask] = Q_sa_double_DQN
         else:
             # Vanilla DQN, getting action from target_net
-            with torch.no_grad():
+            with torch.no_grad():        
+                # Get action, no noisy in policy net      
                 if USE_NOISY_NET:
-                    target_net.sample_noise()                  
+                    target_net.sample_noise()                
                 target_Q_sa = target_net(non_final_next_states)
                 Q_sa_DQN    = target_Q_sa.max(1)[0].unsqueeze(1)
                 next_Q_sa[non_final_mask] = Q_sa_DQN

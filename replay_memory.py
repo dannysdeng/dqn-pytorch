@@ -104,7 +104,8 @@ class PrioritizedReplayBuffer():
         return batch_sample, indices, weights
     def update_priority_on_tree(self, tree_idx, abs_TD_errors):
         assert(len(tree_idx) == len(abs_TD_errors))
-        abs_TD_errors  = np.nan_to_num(abs_TD_errors).tolist()
+        abs_TD_errors  = np.nan_to_num(abs_TD_errors) + self.e
+        abs_TD_errors  = abs_TD_errors.tolist()
         #
         for index, priority in zip(tree_idx, abs_TD_errors):
             assert(priority > 0)
