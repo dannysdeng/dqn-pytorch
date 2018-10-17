@@ -367,6 +367,7 @@ def optimize_model():
     # print_now('in optimize_model, device = {}'.format(device))
     if PRIORITIZED_MEMORY:
         transitions, batch_index, batch_weight_IS = memory.sample(BATCH_SIZE)
+        batch_weight_IS       = torch.tensor(batch_weight_IS).to(device) # [32,]
     else:
         transitions = memory.sample(BATCH_SIZE)
 
@@ -381,7 +382,7 @@ def optimize_model():
     state_batch           = torch.cat(batch.state).to(device)
     action_batch          = torch.cat(batch.action).to(device) # this is of shape [32 x 1]
     reward_batch          = torch.cat(batch.reward).to(device)
-    batch_weight_IS       = torch.tensor(batch_weight_IS).to(device) # [32,]
+    
     #
     if USE_QR_C51:
         QR_C51_action = action_batch.unsqueeze(dim=-1).expand(-1, -1, QR_C51_atoms)
@@ -435,6 +436,9 @@ def optimize_model():
             # Double DQN, getting action from policy net. 
             # See https://medium.freecodecamp.org/improvements-in-deep-q-learning-dueling-double-dqn-prioritized-experience-replay-and-fixed-58b130cc5682
             with torch.no_grad():
+                if USE_NOISY_NET:
+                    policy_net.sample_noise()    
+                    target_net.sample_noise()                
                 target_Q_sa             = target_net(non_final_next_states)
                 action_from_policy_Q_sa = policy_net(non_final_next_states).max(1)[1].unsqueeze(1)  # max of the first dimension --> tuple(val, index). 
                 Q_sa_double_DQN = target_Q_sa.gather(1, action_from_policy_Q_sa)                    # We use the action index from policy net
@@ -442,6 +446,8 @@ def optimize_model():
         else:
             # Vanilla DQN, getting action from target_net
             with torch.no_grad():
+                if USE_NOISY_NET:
+                    target_net.sample_noise()                  
                 target_Q_sa = target_net(non_final_next_states)
                 Q_sa_DQN    = target_Q_sa.max(1)[0].unsqueeze(1)
                 next_Q_sa[non_final_mask] = Q_sa_DQN
