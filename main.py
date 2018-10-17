@@ -254,6 +254,8 @@ def next_distribution(non_final_next_states, batch_reward, non_final_mask):
     with torch.no_grad():
         quantiles_next = torch.zeros((BATCH_SIZE, QR_C51_atoms), device=device, dtype=torch.float)
         max_next_action                = get_action_argmax_next_Q_sa_QRC51(non_final_next_states)
+        if USE_NOISY_NET:
+            target_net.sample_noise()        
         quantiles_next[non_final_mask] = target_net(non_final_next_states).gather(1, max_next_action).squeeze(1) 
         # output should change from [32 x 1 x 51] --> [32 x 51]
         # batch_reward should be of size [32 x 1]
