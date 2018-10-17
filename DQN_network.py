@@ -12,57 +12,6 @@ def print_now(cmd):
     print('%s %s' % (time_now, cmd))
     sys.stdout.flush()
 
-class Flatten(nn.Module):
-    def forward(self, x):
-        return x.view(x.size(0), -1)
-
-class NNBase(nn.Module):
-    def __init__(self, recurrent, recurrent_input_size, hidden_size):
-        super(NNBase, self).__init__()
-        self._hidden_size = hidden_size
-        self._recurrent   = recurrent
-
-        if recurrent:
-            self.gru = nn.GRUCell(recurrent_input_size, hidden_size)
-            nn.init.orthogonal_(self.gru.weight_ih.data)
-            nn.init.orthogonal_(self.gru.weight_hh.data)
-            self.gru.bias_ih.data.fill_(0)
-            self.gru.bias_hh.data.fill_(0)
-    @property
-    def is_recurrent(self):
-        return self._recurrent
-    
-    @property
-    def recurrent_hidden_state_size(self):
-        return self._hidden_size if self._recurrent else 1
-
-    @property
-    def output_size(self):
-        return self._hidden_size
-
-    def _forward_gru(self, x, hxs, masks):
-        if x.size(0) == hxs.size(0):
-            x = hxs = self.gru(x, hxs * masks)
-        else:
-            # x is a (T, N, -1) tensor that has been flatten to (T*N, -1)
-            N = hxs.size(0)
-            T = int(x.size(0) / N)
-
-            # unflatten
-            x     = x.view(T, N, x.size(1))
-            masks = mask.view(T, N, 1)
-
-            outputs = []
-            for i in range(T):
-                hx = hxs = self.gru(x[i], hxs*masks[i])
-                output.append(hx)
-            # 
-            # assert len(outputs) == T
-            # x is a (T, N, -1) tensor
-            x = torch.stack(outputs, dim=0)
-            # flatten
-            x = x.view(T*N, -1)
-        return x, hxs 
 
 class NoisyLinear(nn.Module):
     def __init__(self, in_features, out_features, std_init=0.1):
@@ -144,10 +93,13 @@ class DQN(nn.Module):
                                nn.init.orthogonal_,
                                lambda x: nn.init.constant_(x, 0))        
         self.use_duel = use_duel
+        self.use_noisy_net = use_noisy_net
 
         self.conv1 = init_(nn.Conv2d(num_inputs, 32, 8, stride=4))
         self.conv2 = init_(nn.Conv2d(32, 64, 4, stride=2))
         self.conv3 = init_(nn.Conv2d(64, 32, 3, stride=1))
+
+        
 
         if use_noisy_net:
             Linear = NoisyLinear
@@ -189,3 +141,104 @@ class DQN(nn.Module):
             x = F.relu(self.fc(x))
             y = self.critic_linear(x)            
         return y
+    def sample_noise(self):
+        if self.use_noisy_net:
+            if self.use_duel:
+                self.val_fc.sample_noise()
+                self.val.sample_noise()
+                self.adv_fc.sample_noise()
+                self.adv.sample_noise()
+            else:
+                self.fc.sample_noise()
+                self.critic_linear.sample_noise()
+
+
+class C51(nn.Module):
+    def __init__(self, num_inputs, hidden_size=512, num_actions=4, 
+                       use_duel=False, use_noisy_net=False, atoms=51, vmin=-10, vmax=10, use_qr_c51=False):
+        super(C51, self).__init__()
+        self.atoms = atoms
+        self.vmin  = vmin
+        self.vmax  = vmax
+        self.num_actions   = num_actions
+        self.use_duel      = use_duel
+        self.use_noisy_net = use_noisy_net
+        self.use_qr_c51    = use_qr_c51
+        init_ = lambda m: init(m, 
+                               nn.init.orthogonal_,
+                               lambda x: nn.init.constant_(x, 0), 
+                               nn.init.calculate_gain('relu'))
+        init2_ = lambda m: init(m, 
+                               nn.init.orthogonal_,
+                               lambda x: nn.init.constant_(x, 0))        
+
+
+        self.conv1 = init_(nn.Conv2d(num_inputs, 32, 8, stride=4))
+        self.conv2 = init_(nn.Conv2d(32, 64, 4, stride=2))
+        self.conv3 = init_(nn.Conv2d(64, 32, 3, stride=1))    
+
+        if use_noisy_net:
+            Linear = NoisyLinear
+        else:
+            Linear = nn.Linear
+
+        self.fc1 = Linear(32*7*7, hidden_size)
+        self.fc2 = Linear(hidden_size, num_actions*atoms)
+    
+        if self.use_duel:
+            self.val_fc = Linear(32*7*7, hidden_size)
+            self.val    = Linear(hidden_size, atoms)
+
+        # Param init
+        if not use_noisy_net:
+            self.fc1 = init_(self.fc1)
+            self.fc2 = init2_(self.fc2)
+            if self.use_duel:
+                self.val_fc = init_(self.val_fc)
+                self.val    = init2_(self.val)
+
+     
+
+    def forward(self, x):
+        x = x / 255.0
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = x.view(x.size(0), -1)
+        
+        if self.use_duel:
+            val_x    = F.relu(self.val_fc(x))
+            values   = self.val(val_x).unsqueeze(1) # from batch x atoms to batch x 1 x atoms
+
+            x = F.relu(self.fc1(x))
+            x = self.fc2(x)
+            x_batch = x.view(-1, self.num_actions, self.atoms)
+
+            duel = values + x_batch - x_batch.mean(1, keepdim=True)
+            if self.use_qr_c51:
+                y = duel
+            else:
+                y = F.softmax(duel, dim = 2) # y is of shape [batch x action x atoms]             
+        else:
+            # A Tensor of shape [batch x actions x atoms].
+            x = F.relu(self.fc1(x))
+            x = self.fc2(x)
+            x_batch = x.view(-1, self.num_actions, self.atoms)
+            if self.use_qr_c51:
+                y = x_batch
+            else:
+                y = F.softmax(x_batch, dim=2) # y is of shape [batch x action x atoms]            
+            
+        return y
+
+    def sample_noise(self):
+        if self.use_noisy_net:
+            if self.use_duel:
+                self.fc1.sample_noise()
+                self.fc2.sample_noise()
+                self.val_fc.sample_noise()
+                self.val.sample_noise()
+            else:
+                self.fc1.sample_noise()
+                self.fc2.sample_noise()    
+

@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import gc
 
 
 """ A2C specific arguments """
@@ -27,7 +28,7 @@ import torch.optim as optim
 # from utils import get_vec_normalize
 
 # DQN specific arguments
-from DQN_network import DQN
+from DQN_network import DQN, C51
 from replay_memory import ReplayMemory, PrioritizedReplayBuffer
 from utils import init
 from env import make_vec_envs
@@ -91,6 +92,11 @@ parser.add_argument('--use-duel', action='store_true', default=False,
 parser.add_argument('--use-noisy-net', action='store_true', default=False,
                     help='use dueling architecture')
 
+parser.add_argument('--use-C51', action='store_true', default=False,
+                    help='use categorical value distribution C51')
+
+parser.add_argument('--use-QR-C51', action='store_true', default=False,
+                    help='use categorical value distribution C51')
 
 
 
@@ -112,6 +118,13 @@ USE_N_STEP         = args.use_n_step
 NUM_LOOKAHEAD      = args.num_lookahead
 USE_DUEL           = args.use_duel
 USE_NOISY_NET      = args.use_noisy_net
+USE_C51            = args.use_C51
+USE_QR_C51         = args.use_QR_C51
+if USE_QR_C51:
+    assert(USE_C51 is True)
+
+if not USE_N_STEP:
+    NUM_LOOKAHEAD = 1
 
 # Booking Keeping
 print_now('------- Begin DQN with --------')
@@ -120,6 +133,8 @@ print_now('Using Prioritized buffer:        {}'.format(PRIORITIZED_MEMORY))
 print_now('Using N-step reward with N = {}:  {}'.format(NUM_LOOKAHEAD, USE_N_STEP))
 print_now('Using Duel (advantage):          {}'.format(USE_DUEL))
 print_now('Using Noisy Net:                 {}'.format(USE_NOISY_NET))
+print_now('Using C51                        {}'.format(USE_C51))
+print_now('Using Quantile Regression C51:   {}'.format(USE_QR_C51))
 print_now('Seed: {}'.format(args.seed))
 print_now('------- -------------- --------')
 print_now('Task: {}'.format(args.env_name))
@@ -159,8 +174,14 @@ envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                     args.gamma, args.log_dir, args.add_timestep, device, False)
 
 action_space = envs.action_space.n
-policy_net = DQN(num_inputs=4, num_actions=action_space, use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET).to(device)
-target_net = DQN(num_inputs=4, num_actions=action_space, use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET).to(device)
+if USE_C51:
+    policy_net = C51(num_inputs=4, num_actions=action_space, 
+                        use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET, use_qr_c51=USE_QR_C51).to(device)
+    target_net = C51(num_inputs=4, num_actions=action_space, 
+                        use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET, use_qr_c51=USE_QR_C51).to(device)
+else:
+    policy_net = DQN(num_inputs=4, num_actions=action_space, use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET).to(device)
+    target_net = DQN(num_inputs=4, num_actions=action_space, use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET).to(device)
 target_net.load_state_dict(policy_net.state_dict())
 policy_net.train()
 target_net.eval()
@@ -202,10 +223,91 @@ def n_step_preprocess(st_0, action, st_1, reward, done):
         return prev_transition.state, prev_transition.action, st_1, torch.tensor([[n_step_reward]], dtype=torch.float)
     #
 
+# -------------------------------------------------------------------######
+if USE_C51:
+    C51_atoms =  51
+    C51_vmax  =  10.0
+    C51_vmin  = -10.0
+    C51_support = torch.linspace(C51_vmin, C51_vmax, C51_atoms).view(1, 1, C51_atoms).to(device) # Shape  1 x 1 x 51
+    C51_delta   = (C51_vmax - C51_vmin) / (C51_atoms - 1)
 
+    if USE_QR_C51:
+        QR_C51_atoms = C51_atoms
+        QR_C51_quantile_weight = 1.0 / QR_C51_atoms
+        QR_C51_cum_density = (2 * np.arange(QR_C51_atoms) + 1) / (2.0 * QR_C51_atoms)
+        QR_C51_cum_density =  torch.tensor(QR_C51_cum_density, device=device, dtype=torch.float)
+
+def next_distribution(non_final_next_states, batch_reward, non_final_mask):
+    """
+    This is for Quantile Regression C51
+    """
+    def get_action_argmax_next_Q_sa_QRC51(next_states):
+        if DOUBLE_Q_LEARNING:
+            next_dist = policy_net(next_states) * QR_C51_quantile_weight
+        else:
+            next_dist = target_net(next_states) * QR_C51_quantile_weight
+        next_Q_sa = next_dist.sum(dim=2).max(1)[1]             # next_Q_sa is of size: [batch ] of action index 
+        next_Q_sa = next_Q_sa.view(next_states.size(0), 1, 1)  # Make it to be size of [32 x 1 x 1]
+        next_Q_sa = next_Q_sa.expand(-1, -1, QR_C51_atoms)        # Expand to be [32 x 1 x 51], one action, expand to support
+        return next_Q_sa
+
+    with torch.no_grad():
+        quantiles_next = torch.zeros((BATCH_SIZE, QR_C51_atoms), device=device, dtype=torch.float)
+        max_next_action                = get_action_argmax_next_Q_sa_QRC51(non_final_next_states)
+        quantiles_next[non_final_mask] = target_net(non_final_next_states).gather(1, max_next_action).squeeze(1) 
+        # output should change from [32 x 1 x 51] --> [32 x 51]
+        # batch_reward should be of size [32 x 1]
+        quantiles_next = batch_reward + (GAMMA**NUM_LOOKAHEAD) * quantiles_next
+    return quantiles_next
+
+
+
+def project_distribution(batch_state, batch_action, non_final_next_states, batch_reward, non_final_mask):
+    """
+    This is for orignal C51, with KL-divergence.
+    """
+    def get_action_argmax_next_Q_sa(next_states):
+        if DOUBLE_Q_LEARNING:
+            next_dist = policy_net(next_states) * C51_support      # Next_Distribution is of size: [batch x action x atoms]  
+        else:
+            next_dist = target_net(next_states) * C51_support      # Next_Distribution is of size: [batch x action x atoms]  
+        next_Q_sa = next_dist.sum(dim=2).max(1)[1]             # next_Q_sa is of size: [batch ] of action index 
+        next_Q_sa = next_Q_sa.view(next_states.size(0), 1, 1)  # Make it to be size of [32 x 1 x 1]
+        next_Q_sa = next_Q_sa.expand(-1, -1, C51_atoms)        # Expand to be [32 x 1 x 51], one action, expand to support
+        return next_Q_sa
+
+    with torch.no_grad():
+        max_next_dist = torch.zeros((BATCH_SIZE, 1, C51_atoms), device=device, dtype=torch.float)
+        max_next_dist += 1.0 / C51_atoms
+        #
+        max_next_action               = get_action_argmax_next_Q_sa(non_final_next_states)
+        if USE_NOISY_NET:
+            target_net.sample_noise()
+        max_next_dist[non_final_mask] = target_net(non_final_next_states).gather(1, max_next_action)
+        max_next_dist = max_next_dist.squeeze()
+        #
+        # Mapping
+        Tz = batch_reward.view(-1, 1) + (GAMMA**NUM_LOOKAHEAD) * C51_support.view(1, -1) * non_final_mask.to(torch.float).view(-1, 1)
+        Tz = Tz.clamp(C51_vmin, C51_vmax)
+        C51_b = (Tz - C51_vmin) / C51_delta
+        C51_L = C51_b.floor().to(torch.int64)
+        C51_U = C51_b.ceil().to(torch.int64)
+        C51_L[ (C51_U > 0)               * (C51_L == C51_U)] -= 1
+        C51_U[ (C51_L < (C51_atoms - 1)) * (C51_L == C51_U)] += 1
+        offset = torch.linspace(0, (BATCH_SIZE - 1) * C51_atoms, BATCH_SIZE)
+        offset = offset.unsqueeze(dim=1) 
+        offset = offset.expand(BATCH_SIZE, C51_atoms).to(batch_action) # I believe this is to(device)
+
+        # I believe this is analogous to torch.new_zeros()
+        m = batch_state.new_zeros(BATCH_SIZE, C51_atoms) # Returns a Tensor of size size filled with 0. same dtype
+        m.view(-1).index_add_(0, (C51_L + offset).view(-1), (max_next_dist * (C51_U.float() - C51_b)).view(-1))
+        m.view(-1).index_add_(0, (C51_U + offset).view(-1), (max_next_dist * (C51_b - C51_L.float())).view(-1))
+    return m
 # -------------------------------------------------------------------######
 
 
+
+# -------------------------------------------------------------------######
 # Two stage epsilon decay following https://blog.openai.com/openai-baselines-dqn/
 # But this is basically like expoenntial decay
 eps_schedule1 = LinearSchedule(schedule_timesteps=int(1e6),  # first 1 million
@@ -224,15 +326,38 @@ def select_action(state, action_space):
     steps_done += 1
     if USE_NOISY_NET or random.random() > eps_threshold:
         with torch.no_grad():
-            y = policy_net(state)
-            y = y.max(1) # (tensor([0.2177], grad_fn=<MaxBackward0>), tensor([0]))
-            action = y[1].view(1, 1)
+            if USE_QR_C51:
+                if USE_NOISY_NET:
+                    policy_net.sample_noise()
+                y = policy_net(state)
+                y = y * QR_C51_quantile_weight
+                y = y.sum(dim=2).max(1)
+                action = y[1].view(1, 1)
+
+            elif USE_C51:
+                if USE_NOISY_NET:
+                    policy_net.sample_noise()                
+                y = policy_net(state)
+                y = y * C51_support
+                y = y.sum(dim=2).max(1)
+                action = y[1].view(1, 1)
+            else:
+                if USE_NOISY_NET:
+                    policy_net.sample_noise()
+                y = policy_net(state)
+                y = y.max(1) # (tensor([0.2177], grad_fn=<MaxBackward0>), tensor([0]))
+                action = y[1].view(1, 1)
     else:
         action = torch.tensor([[random.randrange(action_space)]], device=device, dtype=torch.long)
     return action
 
 # optimize
 def optimize_model():
+    #
+    def huber_loss(x):
+        cond = (x.abs() < 1.0).float().detach()
+        return 0.5 * x.pow(2) * cond + (x.abs() - 0.5) * (1.0 - cond)
+
     # print_now('in optimize_model, device = {}'.format(device))
     if PRIORITIZED_MEMORY:
         transitions, batch_index, batch_weight_IS = memory.sample(BATCH_SIZE)
@@ -242,44 +367,92 @@ def optimize_model():
     batch       = Transition(*zip(*transitions))
     non_final             = tuple(map(lambda s: s is not None,  batch.next_state))
     non_final_mask        = torch.tensor(non_final, device=device, dtype=torch.uint8)
-    non_final_next_states = torch.cat([s for s in batch.next_state if s is not None]).to(device)
+    sanity_check          = [s for s in batch.next_state if s is not None]
+    if len(sanity_check) == 0:
+        return None, None, None
+    non_final_next_states = torch.cat(sanity_check).to(device)
     #
     state_batch           = torch.cat(batch.state).to(device)
-    action_batch          = torch.cat(batch.action).to(device)
+    action_batch          = torch.cat(batch.action).to(device) # this is of shape [32 x 1]
     reward_batch          = torch.cat(batch.reward).to(device)
     #
-    Q_sa          = policy_net(state_batch).gather(1, action_batch)
-    next_Q_sa     = torch.zeros((BATCH_SIZE, 1), device=device)
-    if DOUBLE_Q_LEARNING:
-        # Double DQN, getting action from policy net. 
-        # See https://medium.freecodecamp.org/improvements-in-deep-q-learning-dueling-double-dqn-prioritized-experience-replay-and-fixed-58b130cc5682
-        with torch.no_grad():
-            target_Q_sa             = target_net(non_final_next_states)
-            action_from_policy_Q_sa = policy_net(non_final_next_states).max(1)[1].unsqueeze(1)  # max of the first dimension --> tuple(val, index). 
-            Q_sa_double_DQN = target_Q_sa.gather(1, action_from_policy_Q_sa)                    # We use the action index from policy net
-            next_Q_sa[non_final_mask] = Q_sa_double_DQN
+    if USE_QR_C51:
+        QR_C51_action = action_batch.unsqueeze(dim=-1).expand(-1, -1, QR_C51_atoms)
+        QR_C51_reward = reward_batch.view(-1, 1) # [32 x 1]
+        #
+        if USE_NOISY_NET:
+            policy_net.sample_noise()        
+        y = policy_net(state_batch)
+        quantiles     = y.gather(1, QR_C51_action)      # [32 x 1 x 51]
+        quantiles     = quantiles.squeeze(1) # [32 x 51]
+        #
+        quantiles_next = next_distribution(non_final_next_states, QR_C51_reward, non_final_mask) # [32, 51]
+        #
+        #              [51 x 32 x 1 ]                [1, 32, 51]
+        diff = quantiles_next.t().unsqueeze(-1) - quantiles.unsqueeze(0) # diff is of shape [51, 32 51]
+        loss = huber_loss(diff) * torch.abs( QR_C51_cum_density.view(1, -1) - (diff < 0).to(torch.float) )
+        # loss is now of shape [51, 32, 51]
+        loss = loss.transpose(0,1) # loss is now of shape [32, 51, 51]
+        loss = loss.mean(1).sum(-1)
+        loss_PER = loss.detach().squeeze().abs().cpu().numpy()
+        loss = loss.mean()
+        #
+        ds = y.detach() * QR_C51_quantile_weight
+        Q_sa = ds.sum(dim=2).gather(1, action_batch)        
+    elif USE_C51:
+        #                           [32 x 1 x 1]           [32 x 1 x 51]
+        C51_action   = action_batch.unsqueeze(dim=-1).expand(-1, -1, C51_atoms)
+        C51_reward   = reward_batch.view(-1, 1, 1) # [32 x 1 x 1]
+        #                            [32 x 1 x 51]         --->           [32 x 51]
+        if USE_NOISY_NET:
+            policy_net.sample_noise()
+        y = policy_net(state_batch)
+        current_dist = y.gather(1, C51_action).squeeze()
+        target_prob  = project_distribution(state_batch, C51_action, non_final_next_states, C51_reward, non_final_mask) # torch.Size([32, 51])
+        loss = -(target_prob * current_dist.log()).sum(-1)
+        loss_PER = loss.detach().squeeze().abs().cpu().numpy()
+        loss = loss.mean()
+        #
+        ds = y.detach() * C51_support
+        Q_sa = ds.sum(dim=2).gather(1, action_batch)
     else:
-        # Vanilla DQN, getting action from target_net
-        with torch.no_grad():
-            target_Q_sa = target_net(non_final_next_states)
-            Q_sa_DQN    = target_Q_sa.max(1)[0].unsqueeze(1)
-            next_Q_sa[non_final_mask] = Q_sa_DQN
+    #   # Normal DQN. Minimize expected TD error ------------------------######
+        Q_sa          = policy_net(state_batch).gather(1, action_batch)
+        next_Q_sa     = torch.zeros((BATCH_SIZE, 1), device=device)
+        if DOUBLE_Q_LEARNING:
+            # Double DQN, getting action from policy net. 
+            # See https://medium.freecodecamp.org/improvements-in-deep-q-learning-dueling-double-dqn-prioritized-experience-replay-and-fixed-58b130cc5682
+            with torch.no_grad():
+                target_Q_sa             = target_net(non_final_next_states)
+                action_from_policy_Q_sa = policy_net(non_final_next_states).max(1)[1].unsqueeze(1)  # max of the first dimension --> tuple(val, index). 
+                Q_sa_double_DQN = target_Q_sa.gather(1, action_from_policy_Q_sa)                    # We use the action index from policy net
+                next_Q_sa[non_final_mask] = Q_sa_double_DQN
+        else:
+            # Vanilla DQN, getting action from target_net
+            with torch.no_grad():
+                target_Q_sa = target_net(non_final_next_states)
+                Q_sa_DQN    = target_Q_sa.max(1)[0].unsqueeze(1)
+                next_Q_sa[non_final_mask] = Q_sa_DQN
 
-    Expected_Q_sa = reward_batch + (GAMMA * next_Q_sa)
-    #
-    loss = F.smooth_l1_loss(Q_sa, Expected_Q_sa)
+        Expected_Q_sa = reward_batch + ((GAMMA**NUM_LOOKAHEAD) * next_Q_sa)
+        #
+        loss = F.smooth_l1_loss(Q_sa, Expected_Q_sa)
     # -------------------------------------------------------------------######
     if PRIORITIZED_MEMORY:
-        TD_error = Q_sa.detach() - Expected_Q_sa.detach()
-        TD_error = TD_error.cpu().numpy().squeeze()
-        abs_TD_error = abs(TD_error)
-        memory.update_priority_on_tree(batch_index, abs_TD_error)
+        if USE_C51 or USE_QR_C51:
+            memory.update_priority_on_tree(batch_index, loss_PER)
+        else:
+            TD_error = Q_sa.detach() - Expected_Q_sa.detach()
+            TD_error = TD_error.cpu().numpy().squeeze()
+            abs_TD_error = abs(TD_error)
+            memory.update_priority_on_tree(batch_index, abs_TD_error)
     # -------------------------------------------------------------------######
     optimizer.zero_grad()
     loss.backward()
     for param in policy_net.parameters():
         param.grad.data.clamp_(-1, 1)
     optimizer.step()
+    # -------------------------------------------------------------------######
     Qval = Q_sa.cpu().detach().numpy().squeeze()
     return loss, np.mean(Qval), np.mean(reward_batch.cpu().numpy().squeeze())
     #
@@ -298,32 +471,7 @@ def save_model():
     # save_model = [save_model, getattr(get_vec_normalize(envs), 'ob_rms', None)]
     torch.save(save_model, 
                os.path.join(save_path, "%s.pt"%(args.env_name)))
-
-def PER_pre_fill_memory(envs):
-    """
-    Pre-filling the memory buffer if we are doing Prioritized Experience Replay 
-    """
-    state = envs.reset()
-    print_now('Begin to pre-fill [Prioritized Experience Replay Memory]')
-    for j in range(args.memory_size):
-        action = torch.tensor([[random.randrange(action_space)]], device=device, dtype=torch.long)
-        st_0 = copy.deepcopy(state)      # IMPORTANT. Make a deep copy as state will be come next_state AUTOMATICALLY
-        next_state, reward, done, info = envs.step(action)
-        st_1 = copy.deepcopy(next_state)
-        # We only ensure one environment here
-        # -------------------------------------------------------------------######    
-        if USE_N_STEP:
-            st_0, action, st_1, reward = n_step_preprocess(st_0, action, st_1, reward, done[0])
-        # -------------------------------------------------------------------######    
-        if done[0]:
-            memory.push(st_0, action, None, reward)
-            print_now('Pre-filling Replay Memory %d / %d -- action: %d' % (j+1, args.memory_size, action.item()))
-        elif st_0 is not None:
-            memory.push(st_0, action, st_1, reward)      
-            print_now('Pre-filling Replay Memory %d / %d -- action: %d' % (j+1, args.memory_size, action.item()))
-        state = next_state  
-    return state
-    #
+    gc.collect()
 
 # main
 def main():

@@ -2,6 +2,7 @@ from collections import namedtuple
 import random
 import numpy as np
 from utils import SumTree
+from utils import SumSegmentTree, MinSegmentTree
 
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 class ReplayMemory(object):
@@ -25,7 +26,98 @@ class ReplayMemory(object):
         return len(self.memory)
 
 class PrioritizedReplayBuffer():
-    # Remember to deal with EMPTY MEMORY PROBLEM by pre-filling the prioritized memory with Random (St0, At0, St1, Rt0)
+    """
+    OpenAI Baseline
+    """
+    def __init__(self, size, T_max, learn_start):
+        self._storage = []
+        self._maxsize = size
+        self._next_idx = 0
+        #
+        it_capacity = 1
+        while it_capacity < size:
+            it_capacity *= 2
+        self._sumTree = SumSegmentTree(it_capacity)
+        self._minTree = MinSegmentTree(it_capacity)
+        self._max_priority = 1.0
+        #
+        self.e     = 0.01
+        self.alpha = 0.5 # tradeoff between taking only experience with high-priority samples
+        self.beta  = 0.4 # Importance Sampling, from 0.4 -> 1.0 over the course of training
+        self.beta_increment = (1 - self.beta) / (T_max - learn_start)
+        self.abs_error_clipUpper = 1.0
+        self.NORMALIZE_BY_BATCH = False # In openAI baseline, normalize by whole        
+
+    def __len__(self):
+        return len(self._storage)
+
+    def push(self, state, action, next_state, reward):
+        idx = self._next_idx
+        #
+        # Setting maximum priority for new transitions. Total priority will be updated
+        if next_state is not None:
+            data = Transition(state.cpu(), action.cpu(), next_state.cpu(), reward.cpu())
+        else:
+            data = Transition(state.cpu(), action.cpu(), None, reward.cpu())
+        #
+        if self._next_idx >= len(self._storage):
+            self._storage += data,
+        else:
+            self._storage[self._next_idx] = data
+        self._next_idx = (self._next_idx + 1) % self._maxsize
+        #
+        self._sumTree[idx] = self._max_priority ** self.alpha
+        self._minTree[idx] = self._max_priority ** self.alpha
+
+    def sample(self, batch_size):
+        # indices = self._sample_proportional(batch_size)
+        indices      = []
+        batch_sample = []
+        weights = []
+        # Increase the beta each time we sample a new mini-batch until it reaches 1.0
+        self.beta = min(self.beta + self.beta_increment, 1.0)        
+        #
+        total_priority   = self._sumTree.sum(0, len(self._storage) - 1)
+        priority_segment = total_priority / batch_size
+        #
+        min_priority            = self._minTree.min() / self._sumTree.sum()
+        max_weight_ALL_memory   = (min_priority * len(self._storage)) ** (-self.beta)
+        #        
+        for i in range(batch_size):
+            mass = (i + random.random()) * priority_segment
+            index  = self._sumTree.find_prefixsum_idx(mass)
+            # P(j) --> stochastic priority
+            stochastic_p = self._sumTree[index] / total_priority
+            this_weight_IS = (stochastic_p * len(self._storage)) ** (-self.beta)
+            """
+                Importance Sampling Weight:
+                     [   1      1        ]^(beta)
+                     |  --- * -----------|
+                     [   N     prob_min  ]                
+            """
+            this_weight_IS /= max_weight_ALL_memory
+            # Append to list
+            weights      += this_weight_IS,
+            batch_sample += self._storage[index],
+            indices      += index,
+            #
+        return batch_sample, indices, weights
+    def update_priority_on_tree(self, tree_idx, abs_TD_errors):
+        assert(len(tree_idx) == len(abs_TD_errors))
+        abs_TD_errors  = np.nan_to_num(abs_TD_errors)
+        #
+        for index, priority in zip(tree_idx, abs_TD_errors):
+            assert(priority > 0)
+            assert(0<=index<=len(self._storage))
+            self._sumTree[index] = priority ** self.alpha
+            self._minTree[index] = priority ** self.alpha
+            #
+            self._max_priority = max(self._max_priority, priority)
+    #
+
+
+class PrioritizedReplayBuffer_slow():
+    # Some tutorial
     def __init__(self, capacity, T_max, learn_start):
         self.capacity = capacity
         self.count    = 0
@@ -71,7 +163,7 @@ class PrioritizedReplayBuffer():
         batch_weight_IS = [] # np.empty((n, 1), dtype=np.float32)
 
         # Calculate the priority segment by dividing the ranges
-        total_priority = self.memory.get_total_priority()
+        total_priority   = self.memory.get_total_priority()
         priority_segment = total_priority / batch_size
 
         # Increase the beta each time we sample a new mini-batch until it reaches 1.0
@@ -80,6 +172,7 @@ class PrioritizedReplayBuffer():
         # Calculate the max_weight
         all_priority = self.memory.treeArr[-self.memory.capacity:][:self.count]
         prob_min     = min(all_priority) / total_priority
+        assert(prob_min > 0)
         """
         N is the batch size
 
@@ -135,6 +228,7 @@ class PrioritizedReplayBuffer():
         """ 
             A bunch of tree indices and a bunch of TD_errors
         """
+        abs_TD_errors  = np.nan_to_num(abs_TD_errors)
         abs_TD_errors  += self.e # p_t = |delta_t| + e
         clipped_errors = np.minimum(abs_TD_errors, self.abs_error_clipUpper)
         pt_alpha       = np.power(clipped_errors, self.alpha)
