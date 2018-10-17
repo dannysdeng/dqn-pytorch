@@ -240,6 +240,7 @@ if USE_C51:
         QR_C51_cum_density = (2 * np.arange(QR_C51_atoms) + 1) / (2.0 * QR_C51_atoms)
         QR_C51_cum_density =  torch.tensor(QR_C51_cum_density, device=device, dtype=torch.float)
 
+
 def next_distribution(non_final_next_states, batch_reward, non_final_mask):
     """
     This is for Quantile Regression C51
