@@ -237,6 +237,7 @@ if USE_C51:
     if USE_QR_C51:
         QR_C51_atoms = C51_atoms
         QR_C51_quantile_weight = 1.0 / QR_C51_atoms
+        # tau
         QR_C51_cum_density = (2 * np.arange(QR_C51_atoms) + 1) / (2.0 * QR_C51_atoms)
         QR_C51_cum_density =  torch.tensor(QR_C51_cum_density, device=device, dtype=torch.float)
 
@@ -263,7 +264,8 @@ def next_distribution(non_final_next_states, batch_reward, non_final_mask):
         quantiles_next[non_final_mask] = target_net(non_final_next_states).gather(1, max_next_action).squeeze(1) 
         # output should change from [32 x 1 x 51] --> [32 x 51]
         # batch_reward should be of size [32 x 1]
-        quantiles_next = batch_reward + (GAMMA**NUM_LOOKAHEAD) * quantiles_next
+        quantiles_next = batch_reward + (GAMMA**NUM_LOOKAHEAD) * quantiles_next * non_final_mask.to(torch.float).view(-1, 1)
+
     return quantiles_next
 
 
