@@ -125,8 +125,8 @@ if not USE_N_STEP:
 exploration_fraction    = 0.1
 exploration_final_eps_1 = 0.1
 exploration_final_eps_2 = 0.01
-adam_lr =  6.25e-4 # 5e-5     if USE_QR_C51 else 
-adam_eps = 1.5e-4 # 3.125e-4 if USE_QR_C51 else 
+adam_lr =  5e-5     if USE_QR_C51 else 6.25e-4 # 
+adam_eps = 3.125e-4 if USE_QR_C51 else 1.5e-4  # 
 # --------------------------------------------------- #
 # Booking Keeping
 print_now('------- Begin DQN with --------')
@@ -142,6 +142,28 @@ print_now('Seed: {}'.format(args.seed))
 print_now('------- -------------- --------')
 print_now('Task: {}'.format(args.env_name))
 time.sleep(0.1)
+
+device = torch.device("cuda" if args.cuda else "cpu")
+# -------------------------------------------------------------------######
+if USE_C51:
+    C51_atoms =  51
+    C51_vmax  =  10.0
+    C51_vmin  = -10.0
+    C51_support = torch.linspace(C51_vmin, C51_vmax, C51_atoms).view(1, 1, C51_atoms).to(device) # Shape  1 x 1 x 51
+    C51_delta   = (C51_vmax - C51_vmin) / (C51_atoms - 1)
+
+    if USE_QR_C51:
+        C51_atoms    = 200
+        QR_C51_atoms = C51_atoms #C51_atoms
+        QR_C51_quantile_weight = 1.0 / QR_C51_atoms
+        # tau
+        QR_C51_cum_density = (2 * np.arange(QR_C51_atoms) + 1) / (2.0 * QR_C51_atoms)
+        QR_C51_cum_density =  torch.tensor(QR_C51_cum_density, device=device, dtype=torch.float).view(1, -1)
+
+    """               2(i-1) + 1
+            tau_i = ---------------        for i = 1, 2, ..., N
+                          2N
+    """
 
 
 # Seeds
@@ -171,16 +193,15 @@ except OSError:
         os.remove(f)
 
 # Network and Env following A2C-pytorch
-device = torch.device("cuda" if args.cuda else "cpu")
 print_now('Using device: {}'.format(device))
 envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                     args.gamma, args.log_dir, args.add_timestep, device, False)
 
 action_space = envs.action_space.n
 if USE_C51:
-    policy_net = C51(num_inputs=4, num_actions=action_space, 
+    policy_net = C51(num_inputs=4, num_actions=action_space, atoms=C51_atoms,
                         use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET, use_qr_c51=USE_QR_C51).to(device)
-    target_net = C51(num_inputs=4, num_actions=action_space, 
+    target_net = C51(num_inputs=4, num_actions=action_space, atoms=C51_atoms,
                         use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET, use_qr_c51=USE_QR_C51).to(device)
 else:
     policy_net = DQN(num_inputs=4, num_actions=action_space, use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET).to(device)
@@ -226,20 +247,7 @@ def n_step_preprocess(st_0, action, st_1, reward, done):
         return prev_transition.state, prev_transition.action, st_1, torch.tensor([[n_step_reward]], dtype=torch.float)
     #
 
-# -------------------------------------------------------------------######
-if USE_C51:
-    C51_atoms =  51
-    C51_vmax  =  10.0
-    C51_vmin  = -10.0
-    C51_support = torch.linspace(C51_vmin, C51_vmax, C51_atoms).view(1, 1, C51_atoms).to(device) # Shape  1 x 1 x 51
-    C51_delta   = (C51_vmax - C51_vmin) / (C51_atoms - 1)
 
-    if USE_QR_C51:
-        QR_C51_atoms = C51_atoms
-        QR_C51_quantile_weight = 1.0 / QR_C51_atoms
-        # tau
-        QR_C51_cum_density = (2 * np.arange(QR_C51_atoms) + 1) / (2.0 * QR_C51_atoms)
-        QR_C51_cum_density =  torch.tensor(QR_C51_cum_density, device=device, dtype=torch.float)
 
 
 def next_distribution(non_final_next_states, batch_reward, non_final_mask):
@@ -264,7 +272,7 @@ def next_distribution(non_final_next_states, batch_reward, non_final_mask):
         quantiles_next[non_final_mask] = target_net(non_final_next_states).gather(1, max_next_action).squeeze(1) 
         # output should change from [32 x 1 x 51] --> [32 x 51]
         # batch_reward should be of size [32 x 1]
-        quantiles_next = batch_reward + (GAMMA**NUM_LOOKAHEAD) * quantiles_next * non_final_mask.to(torch.float).view(-1, 1)
+        quantiles_next = batch_reward + (GAMMA**NUM_LOOKAHEAD) * quantiles_next
 
     return quantiles_next
 
@@ -401,14 +409,17 @@ def optimize_model():
         #
         #              [51 x 32 x 1 ]                [1, 32, 51]
         diff = quantiles_next.t().unsqueeze(-1) - quantiles.unsqueeze(0) # diff is of shape [51, 32 51]
-        loss = huber_loss(diff) * torch.abs( QR_C51_cum_density.view(1, -1) - (diff < 0).to(torch.float) )
+        loss = huber_loss(diff) * torch.abs( QR_C51_cum_density - (diff < 0).to(torch.float) )
 
         # loss is now of shape [51, 32, 51]
         loss = loss.transpose(0,1) # loss is now of shape [32, 51, 51]
-        loss_PER = loss.detach().mean(1).sum(-1).abs().cpu().numpy()
-        if PRIORITIZED_MEMORY:
-            loss = loss * batch_weight_IS.view(BATCH_SIZE, 1, 1)            
         loss = loss.mean(1).sum(-1)
+        if PRIORITIZED_MEMORY:
+            loss_PER = loss.detach().abs().cpu().numpy()         
+            if len(loss.shape) == 2:
+                batch_weight_IS = batch_weight_IS.view(BATCH_SIZE, 1)            
+            assert(len(loss.shape) == len(batch_weight_IS.shape))
+            loss = loss * batch_weight_IS    
         loss = loss.mean()
         #
         ds = y.detach() * QR_C51_quantile_weight
@@ -424,9 +435,12 @@ def optimize_model():
         current_dist = y.gather(1, C51_action).squeeze()
         target_prob  = project_distribution(state_batch, C51_action, non_final_next_states, C51_reward, non_final_mask) # torch.Size([32, 51])
         loss = -(target_prob * current_dist.log()).sum(-1) # KL Divergence
-        loss_PER = loss.detach().squeeze().abs().cpu().numpy()
         if PRIORITIZED_MEMORY:
-            loss = loss * batch_weight_IS.view(BATCH_SIZE, 1)
+            loss_PER = loss.detach().squeeze().abs().cpu().numpy()
+            if len(loss.shape) == 2:
+                batch_weight_IS = batch_weight_IS.view(BATCH_SIZE, 1)            
+            assert(len(loss.shape) == len(batch_weight_IS.shape))
+            loss = loss * batch_weight_IS # .view(BATCH_SIZE, 1)
         loss = loss.mean()
         #
         ds = y.detach() * C51_support
@@ -462,14 +476,18 @@ def optimize_model():
         #
         if PRIORITIZED_MEMORY:
             diff = Q_sa - Expected_Q_sa
-            loss = huber_loss(diff) * batch_weight_IS.view(BATCH_SIZE, 1)
+            loss = huber_loss(diff)
+            if len(loss.shape) == 2:
+                batch_weight_IS = batch_weight_IS.view(BATCH_SIZE, 1)
+            assert(len(loss.shape) == len(batch_weight_IS.shape))
+            loss = loss * batch_weight_IS
             loss = loss.mean()
             #
             TD_error = Q_sa.detach() - Expected_Q_sa.detach()
             TD_error = TD_error.cpu().numpy().squeeze()
             abs_TD_error = abs(TD_error)
-        else:
-            loss = F.smooth_l1_loss(Q_sa, Expected_Q_sa)
+        else:            
+            loss = F.smooth_l1_loss(Q_sa, Expected_Q_sa)                   
     # -------------------------------------------------------------------######
     if PRIORITIZED_MEMORY:
         if USE_C51 or USE_QR_C51:
