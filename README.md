@@ -7,7 +7,7 @@ Run the Rainbow with
 
 A few notes (Bug might exist): 
 
-   1. Something may be wrong with Quantile Regression-C51, as it did not seem to really out-perform the original C51 in my re-implementation.
+   1. Something may be wrong with my Quantile Regression-C51, as it did not seem to really out-perform the original C51 in my re-implementation.
    2. Rainbow in this repo runs kinda slow on my machine (_TITAN Xp with Intel(R) Xeon(R) CPU E5-2650 v4 @ 2.20GHz_). It only reaches 75 FPS  when using a prioritized memory of size 50,000 on the game _Spaceinvaders_, so it seems that it may not be able to finish 200M within 10 days. (Could be because of the sub-optimal way that is used for pushing new transitions into the PER buffer.)
    
 Any suggestions to make this code better is welcome!
