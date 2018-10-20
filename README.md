@@ -1,5 +1,5 @@
 # dqn-pytorch
-Towards getting Rainbow and all that.
+Towards learning Rainbow-DQN and all that good stuffs.
 
 Run the Rainbow with
 
