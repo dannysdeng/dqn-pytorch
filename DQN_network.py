@@ -80,8 +80,6 @@ class NoisyLinear(nn.Module):
             return F.linear(x, self.weight_mu,
                                self.bias_mu)
         
-
-    
 class DQN(nn.Module):
     def __init__(self, num_inputs, hidden_size=512, num_actions=1, use_duel=False, use_noisy_net=False):
         super(DQN, self).__init__()

@@ -1,5 +1,6 @@
 """
-Great tutorial: https://github.com/qfettes/DeepRL-Tutorials
+The design architecture follows https://github.com/ikostrikov/pytorch-a2c-ppo-acktr
+Each components follow closely with the great tutorial: https://github.com/qfettes/DeepRL-Tutorials
 """
 import copy
 import glob
@@ -192,7 +193,7 @@ except OSError:
     for f in files:
         os.remove(f)
 
-# Network and Env following A2C-pytorch
+# Env following https://github.com/ikostrikov/pytorch-a2c-ppo-acktr
 print_now('Using device: {}'.format(device))
 envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                     args.gamma, args.log_dir, args.add_timestep, device, False)
@@ -314,7 +315,7 @@ def project_distribution(batch_state, batch_action, non_final_next_states, batch
         offset = offset.unsqueeze(dim=1) 
         offset = offset.expand(BATCH_SIZE, C51_atoms).to(batch_action) # I believe this is to(device)
 
-        # I believe this is analogous to torch.new_zeros()
+        # I believe this is analogous to torch.zeros(), but "new_zeros" keeps the type as the original tensor?
         m = batch_state.new_zeros(BATCH_SIZE, C51_atoms) # Returns a Tensor of size size filled with 0. same dtype
         m.view(-1).index_add_(0, (C51_L + offset).view(-1), (max_next_dist * (C51_U.float() - C51_b)).view(-1))
         m.view(-1).index_add_(0, (C51_U + offset).view(-1), (max_next_dist * (C51_b - C51_L.float())).view(-1))
@@ -325,7 +326,7 @@ def project_distribution(batch_state, batch_action, non_final_next_states, batch
 
 # -------------------------------------------------------------------######
 # Two stage epsilon decay following https://blog.openai.com/openai-baselines-dqn/
-# But this is basically like expoenntial decay
+# But this is similar to the curve of expoenntial decay
 eps_schedule1 = LinearSchedule(schedule_timesteps=int(1e6),  # first 1 million
                               initial_p=1.0,
                               final_p  =exploration_final_eps_1)
@@ -368,12 +369,16 @@ def select_action(state, action_space):
     return action
 
 # optimize
+if USE_QR_C51:
+    X_ZERO_QR_C51 = torch.zeros((QR_C51_atoms, BATCH_SIZE, QR_C51_atoms), dtype=torch.float).to(device)
+X_ZERO        = torch.zeros((BATCH_SIZE, 1), dtype=torch.float).to(device)
 def optimize_model():
     #
-    # F.smooth_l1_loss(x, x.zero())
-    def huber_loss(x):
-        cond = (x.abs() < 1.0).float().detach()
-        return 0.5 * x.pow(2) * cond + (x.abs() - 0.5) * (1.0 - cond)
+    # F.smooth_l1_loss(x, x.zero(), reduction='none')
+    def huber_loss_fast(x, xzero):
+        # cond = (x.abs() < 1.0).float().detach()
+        # return 0.5 * x.pow(2) * cond + (x.abs() - 0.5) * (1.0 - cond)
+        return F.smooth_l1_loss(x, xzero, reduction='none')
 
     # print_now('in optimize_model, device = {}'.format(device))
     if PRIORITIZED_MEMORY:
@@ -409,7 +414,8 @@ def optimize_model():
         #
         #              [51 x 32 x 1 ]                [1, 32, 51]
         diff = quantiles_next.t().unsqueeze(-1) - quantiles.unsqueeze(0) # diff is of shape [51, 32 51]
-        loss = huber_loss(diff) * torch.abs( QR_C51_cum_density - (diff < 0).to(torch.float) )
+        #loss = huber_loss(diff) * torch.abs( QR_C51_cum_density - (diff < 0).to(torch.float) )
+        loss = huber_loss_fast(diff, X_ZERO_QR_C51) * torch.abs( QR_C51_cum_density - (diff < 0).to(torch.float) )
 
         # loss is now of shape [51, 32, 51]
         loss = loss.transpose(0,1) # loss is now of shape [32, 51, 51]
@@ -476,7 +482,7 @@ def optimize_model():
         #
         if PRIORITIZED_MEMORY:
             diff = Q_sa - Expected_Q_sa
-            loss = huber_loss(diff)
+            loss = huber_loss_fast(diff, X_ZERO)
             if len(loss.shape) == 2:
                 batch_weight_IS = batch_weight_IS.view(BATCH_SIZE, 1)
             assert(len(loss.shape) == len(batch_weight_IS.shape))
@@ -542,10 +548,12 @@ def main():
     for t in range(int(args.total_timestep)):
         action = select_action(state, action_space)
         action_history.append(action.item())
-        st_0 = copy.deepcopy(state)      # IMPORTANT. Make a deep copy as state will be come next_state AUTOMATICALLY
+        #st_0 = copy.deepcopy(state)      # IMPORTANT. Make a deep copy as state will be come next_state AUTOMATICALLY
+        st_0 = state.clone()      # IMPORTANT. Make a deep copy as state will be come next_state AUTOMATICALLY
 
         next_state, reward, done, info = envs.step(action)
-        st_1 = copy.deepcopy(next_state) # Just to re-iterate the importance, that's all
+        #st_1 = copy.deepcopy(next_state) # Just to re-iterate the importance, that's all
+        st_1 = next_state.clone() # Just to re-iterate the importance, that's all
         if 'episode' in info[0].keys():
             episode_rewards.append(info[0]['episode']['r'])
         # We only ensure one environment here

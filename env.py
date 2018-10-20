@@ -1,3 +1,8 @@
+"""
+Be really carefully when constructing the memory replay buffer as the environment has been wrapped to product
+  "state" and "next_state" using self.stacked_obs.
+"""
+
 import os
 
 import gym
@@ -29,6 +34,7 @@ def make_env(env_id, seed, rank, log_dir, add_timestep, allow_early_resets):
             env = make_atari(env_id)
         env.seed(seed + rank)
         
+        obs_shape = env.observation_space.shape
         if add_timestep:
             if len(obs_shape) == 1 and str(env).find(TimeLimt) > -1:
                 print_now('Adding timestep wrapper to env')
@@ -186,10 +192,3 @@ class VecNormalize(VecNormalize_):
 
     def eval(self):
         self.training = False
-
-
-
-
-
-
-

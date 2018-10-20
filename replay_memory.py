@@ -27,7 +27,7 @@ class ReplayMemory(object):
 
 class PrioritizedReplayBuffer():
     """
-    OpenAI Baseline
+    PrioritizedReplayBuffer From OpenAI Baseline
     """
     def __init__(self, size, T_max, learn_start):
         self._storage = []
@@ -118,7 +118,7 @@ class PrioritizedReplayBuffer():
 
 
 class PrioritizedReplayBuffer_slow():
-    # Some tutorial
+    # Deprecated 
     def __init__(self, capacity, T_max, learn_start):
         self.capacity = capacity
         self.count    = 0

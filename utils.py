@@ -164,6 +164,7 @@ class MinSegmentTree(SegmentTree):
 # Segment tree data structure where parent node values are sum/max of children node values
 # https://github.com/simoninithomas/Deep_reinforcement_learning_Course/blob/master/Dueling%20Double%20DQN%20with%20PER%20and%20fixed-q%20targets/Dueling%20Deep%20Q%20Learning%20with%20Doom%20%28%2B%20double%20DQNs%20and%20Prioritized%20Experience%20Replay%29.ipynb
 class SumTree(object):
+    """ Deprecated """
     def __init__(self, capacity):
         """ 
             Initialize the tree with all nodes  = 0 
