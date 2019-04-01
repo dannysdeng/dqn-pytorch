@@ -309,23 +309,33 @@ class IQN_C51(nn.Module):
         x = F.relu(self.conv3(x))
         x = x.view(x.size(0), -1)
         
-        BATCH_SIZE = x.size(0)
+        BATCH_SIZE     = x.size(0)
         state_net_size = x.size(1)
 
         tau = torch.FloatTensor(BATCH_SIZE * num_quantiles, 1).to(x)
-        _ = tau.uniform_(0, 1)
-        quantile_net = torch.FloatTensor([i for i in range(self.quantile_embedding_dim)]).to(x)
-        cos_tau      = torch.cos(quantile_net * self.pi * tau)
-        out          = F.relu(self.quantile_fc0(cos_tau))
-        fea_tile     = torch.cat([x]*num_quantiles, dim=0)
-        combined_fea = F.relu(self.quantile_fc1(out*fea_tile)) # (batch*atoms, 512)
+        tau.uniform_(0, 1)
+        # ----------------------------------------------------------------------------------------------
+        quantile_net = torch.FloatTensor([i for i in range(1, 1+self.quantile_embedding_dim)]).to(x) 
+        # -------------------------------------------------------------------------------------------------
+        tau_expand   = tau.unsqueeze(-1).expand(-1, -1, self.quantile_embedding_dim) # [Batch*Np x 1 x 64]
+        quantile_net = quantile_net.view(1, 1, -1) # [1 x 1 x 64] -->         [Batch*Np x 1 x 64]
+        quantile_net = quantile_net.expand(BATCH_SIZE*num_quantiles, 1, self.quantile_embedding_dim)
+        cos_tau      = torch.cos(quantile_net * self.pi * tau_expand)       # [Batch*Np x 1 x 64]
+        cos_tau      = cos_tau.squeeze(1)                                   # [Batch*Np x 64]
+        # -------------------------------------------------------------------------------------------------
+        out          = F.relu(self.quantile_fc0(cos_tau))                   # [Batch*Np x feaSize]
+        # fea_tile     = torch.cat([x]*num_quantiles, dim=0)
+        fea_tile     = x.unsqueeze(1).expand(-1, num_quantiles, -1)         # [Batch x Np x feaSize]
+        out          = out.view(BATCH_SIZE, num_quantiles, -1)              # [Batch x Np x feaSize]
+        product      = (fea_tile * out).view(BATCH_SIZE*num_quantiles, -1)
+        combined_fea = F.relu(self.quantile_fc1(product))                   # (Batch*atoms, 512)
 
         if self.use_duel:
-            values   = self.quantile_fc_value(combined_fea) # from batch x atoms to batch x 1 x atoms
-            values   = values.view(-1, 1, num_quantiles)
+            values   = self.quantile_fc_value(combined_fea) # from [batch*atoms x 1] to [Batch x 1 x Atoms]
+            values   = values.view(-1, num_quantiles).unsqueeze(1)
 
             x        = self.fc2(combined_fea)
-            x_batch  = x.view(-1, num_quantiles, self.num_actions)
+            x_batch  = x.view(BATCH_SIZE, num_quantiles, self.num_actions)
             # After transpose, x_batch becomes [batch x actions x atoms]
             x_batch  = x_batch.transpose(1, 2).contiguous()
             action_component = x_batch - x_batch.mean(1, keepdim=True)
@@ -335,7 +345,7 @@ class IQN_C51(nn.Module):
         else:
             x = self.fc2(combined_fea)
             #           [batch x atoms x actions].
-            y = x.view(-1, num_quantiles, self.num_actions)    
+            y = x.view(BATCH_SIZE, num_quantiles, self.num_actions)    
             # output should be # A Tensor of shape [batch x actions x atoms].
             y = y.transpose(1, 2).contiguous()
         # ------------------------------------------------------------------------------------------------ #
