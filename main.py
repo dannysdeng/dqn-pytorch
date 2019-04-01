@@ -29,7 +29,7 @@ import gc
 # from utils import get_vec_normalize
 
 # DQN specific arguments
-from DQN_network import DQN, C51
+from DQN_network import DQN, C51, IQN_C51
 from replay_memory import ReplayMemory, PrioritizedReplayBuffer
 from utils import init
 from env import make_vec_envs
@@ -99,6 +99,21 @@ parser.add_argument('--use-C51', action='store_true', default=False,
 parser.add_argument('--use-QR-C51', action='store_true', default=False,
                     help='use categorical value distribution C51')
 
+parser.add_argument('--use-IQN-C51', action='store_true', default=False,
+                    help='use Inverse Quantile Network')
+
+parser.add_argument('--N_tau', type=int, default=64,
+                    help='Paper N')
+parser.add_argument('--Np_tau', type=int, default=64,
+                    help="Paper N'")
+parser.add_argument('--K_quantile', type=int, default=32,
+                    help="Paper K")
+
+parser.add_argument('--adam_lr', type=float, default=-1,
+                    help="QR-C51")
+parser.add_argument('--adam_eps', type=float, default=-1,
+                    help="QR-C51")
+
 
 
 args = parser.parse_args()
@@ -117,6 +132,11 @@ USE_DUEL           = args.use_duel
 USE_NOISY_NET      = args.use_noisy_net
 USE_C51            = args.use_C51
 USE_QR_C51         = args.use_QR_C51
+USE_IQN_C51        = args.use_IQN_C51
+
+if USE_IQN_C51:
+    assert(USE_QR_C51 is True)
+
 if USE_QR_C51:
     assert(USE_C51 is True)
 
@@ -126,8 +146,12 @@ if not USE_N_STEP:
 exploration_fraction    = 0.1
 exploration_final_eps_1 = 0.1
 exploration_final_eps_2 = 0.01
-adam_lr =  5e-5     if USE_QR_C51 else 6.25e-4 # 
-adam_eps = 3.125e-4 if USE_QR_C51 else 1.5e-4  # 
+if args.adam_lr == -1:
+    adam_lr =  5e-5     if USE_IQN_C51 or USE_QR_C51 or USE_C51 else 6.25e-4 # 
+    adam_eps = 3.125e-4 if USE_IQN_C51 or USE_QR_C51 or USE_C51 else 1.5e-4  # 
+else:
+    adam_lr  = args.adam_lr
+    adam_eps = args.adam_eps
 # --------------------------------------------------- #
 # Booking Keeping
 print_now('------- Begin DQN with --------')
@@ -138,12 +162,13 @@ print_now('Using Duel (advantage):          {}'.format(USE_DUEL))
 print_now('Using Noisy Net:                 {}'.format(USE_NOISY_NET))
 print_now('Using C51                        {}'.format(USE_C51))
 print_now('Using Quantile Regression C51:   {}'.format(USE_QR_C51))
+print_now('Using Implicit Quantile Net C51: {}'.format(USE_IQN_C51))
 print_now('Adam learning rate: {}, eps: {}'.format(adam_lr, adam_eps))
 print_now('Seed: {}'.format(args.seed))
 print_now('------- -------------- --------')
 print_now('Task: {}'.format(args.env_name))
 time.sleep(0.1)
-
+# -------------------------------------------------------------------######
 device = torch.device("cuda" if args.cuda else "cpu")
 # -------------------------------------------------------------------######
 if USE_C51:
@@ -155,11 +180,18 @@ if USE_C51:
 
     if USE_QR_C51:
         C51_atoms    = 200
-        QR_C51_atoms = C51_atoms #C51_atoms
+        QR_C51_atoms = 200 #C51_atoms
         QR_C51_quantile_weight = 1.0 / QR_C51_atoms
         # tau
         QR_C51_cum_density = (2 * np.arange(QR_C51_atoms) + 1) / (2.0 * QR_C51_atoms)
-        QR_C51_cum_density =  torch.tensor(QR_C51_cum_density, device=device, dtype=torch.float).view(1, -1)
+        QR_C51_cum_density =  torch.tensor(QR_C51_cum_density, device=device, dtype=torch.float).view(1, 1, -1, 1)
+        if USE_IQN_C51:
+            C51_atoms    = None
+            QR_C51_atoms = None
+            QR_C51_quantile_weight = None  
+            QR_C51_cum_density = None          
+
+
 
     """               2(i-1) + 1
             tau_i = ---------------        for i = 1, 2, ..., N
@@ -168,11 +200,14 @@ if USE_C51:
 
 
 # Seeds
-torch.manual_seed(args.seed)
-np.random.seed(args.seed)
 random.seed(args.seed)
-if args.cuda:
-    torch.cuda.manual_seed(args.seed)
+np.random.seed(args.seed)
+torch.manual_seed(args.seed)
+torch.cuda.manual_seed_all(args.seed)
+
+import torch.backends.cudnn as cudnn
+cudnn.deterministic = True
+cudnn.benchmark     = False # False should be fully deterministic    
 
 # Importand - logging
 try:
@@ -199,11 +234,18 @@ envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                     args.gamma, args.log_dir, args.add_timestep, device, False)
 
 action_space = envs.action_space.n
-if USE_C51:
+if USE_IQN_C51:
+    policy_net = IQN_C51(num_inputs=4, num_actions=action_space, 
+                        use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET).to(device)
+    target_net = IQN_C51(num_inputs=4, num_actions=action_space, 
+                        use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET).to(device)    
+elif USE_C51:
     policy_net = C51(num_inputs=4, num_actions=action_space, atoms=C51_atoms,
                         use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET, use_qr_c51=USE_QR_C51).to(device)
     target_net = C51(num_inputs=4, num_actions=action_space, atoms=C51_atoms,
                         use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET, use_qr_c51=USE_QR_C51).to(device)
+    if USE_QR_C51:
+        C51_atoms = None
 else:
     policy_net = DQN(num_inputs=4, num_actions=action_space, use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET).to(device)
     target_net = DQN(num_inputs=4, num_actions=action_space, use_duel=USE_DUEL, use_noisy_net=USE_NOISY_NET).to(device)
@@ -248,8 +290,37 @@ def n_step_preprocess(st_0, action, st_1, reward, done):
         return prev_transition.state, prev_transition.action, st_1, torch.tensor([[n_step_reward]], dtype=torch.float)
     #
 
+def IQN_next_distribution(args, non_final_next_states, batch_reward, non_final_mask):
+    """
+    This is for Inverse Quantile Network
+    """
+    def get_action_argmax_next_Q_sa_IQN(args, next_states):
+        if DOUBLE_Q_LEARNING:
+            next_dist, _  = policy_net(next_states, args.K_quantile)
+            #next_dist     = next_dist     * 1 / next_dist.size(1)
+        else:
+            next_dist, _  = target_net(next_states, args.K_quantile)
+            #next_dist     = next_dist     * 1 / next_dist.size(1)
+        # combined  = next_dist.sum(dim=2) 
+        combined  = next_dist.mean(dim=2) 
+        next_Q_sa = combined.max(1)[1]   # next_Q_sa is of size: [batch ] of action index 
+        next_Q_sa = next_Q_sa.view(next_states.size(0), 1, 1)  # Make it to be size of [32 x 1 x 1]
+        next_Q_sa = next_Q_sa.expand(-1, -1, args.Np_tau)  # Expand to be [32 x 1 x 51], one action, expand to support
+        return next_Q_sa
 
+    with torch.no_grad():
+        quantiles_next     = torch.zeros((BATCH_SIZE, args.Np_tau), device=device, dtype=torch.float)
+        max_next_action    = get_action_argmax_next_Q_sa_IQN(args, non_final_next_states)
 
+        if USE_NOISY_NET:
+            target_net.sample_noise()    
+
+        next_y, _ = target_net(non_final_next_states, args.Np_tau)    
+        quantiles_next[non_final_mask]     = next_y.gather(1,     max_next_action).squeeze(1)         
+        # output should change from [32 x 1 x 51] --> [32 x 51]
+        # batch_reward should be of size [32 x 1]
+        quantiles_next     = batch_reward     + (GAMMA**NUM_LOOKAHEAD) * quantiles_next
+    return quantiles_next.detach()
 
 def next_distribution(non_final_next_states, batch_reward, non_final_mask):
     """
@@ -257,10 +328,14 @@ def next_distribution(non_final_next_states, batch_reward, non_final_mask):
     """
     def get_action_argmax_next_Q_sa_QRC51(next_states):
         if DOUBLE_Q_LEARNING:
-            next_dist = policy_net(next_states) * QR_C51_quantile_weight
+            next_dist = policy_net(next_states)
+            #next_dist = next_dist * 1 / next_dist.size(1)
         else:
-            next_dist = target_net(next_states) * QR_C51_quantile_weight
-        next_Q_sa = next_dist.sum(dim=2).max(1)[1]             # next_Q_sa is of size: [batch ] of action index 
+            next_dist = target_net(next_states)
+            #next_dist = next_dist * 1 / next_dist.size(1)
+
+        #next_Q_sa = next_dist.sum(dim=2).max(1)[1]             # next_Q_sa is of size: [batch ] of action index 
+        next_Q_sa = next_dist.mean(dim=2).max(1)[1]             # next_Q_sa is of size: [batch ] of action index 
         next_Q_sa = next_Q_sa.view(next_states.size(0), 1, 1)  # Make it to be size of [32 x 1 x 1]
         next_Q_sa = next_Q_sa.expand(-1, -1, QR_C51_atoms)        # Expand to be [32 x 1 x 51], one action, expand to support
         return next_Q_sa
@@ -275,7 +350,7 @@ def next_distribution(non_final_next_states, batch_reward, non_final_mask):
         # batch_reward should be of size [32 x 1]
         quantiles_next = batch_reward + (GAMMA**NUM_LOOKAHEAD) * quantiles_next
 
-    return quantiles_next
+    return quantiles_next.detach()
 
 
 
@@ -343,12 +418,20 @@ def select_action(state, action_space):
     steps_done += 1
     if USE_NOISY_NET or random.random() > eps_threshold:
         with torch.no_grad():
-            if USE_QR_C51:
+            if USE_IQN_C51:
+                if USE_NOISY_NET:
+                    policy_net.sample_noise()
+                y, _ = policy_net(state, args.K_quantile)
+                # y    = y * 1.0 / y.size(1)
+                y    = y.mean(dim=2).max(1)
+                action = y[1].view(1, 1)                
+
+            elif USE_QR_C51:
                 if USE_NOISY_NET:
                     policy_net.sample_noise()
                 y = policy_net(state)
-                y = y * QR_C51_quantile_weight
-                y = y.sum(dim=2).max(1)
+                # y = y * QR_C51_quantile_weight
+                y = y.mean(dim=2).max(1)
                 action = y[1].view(1, 1)
 
             elif USE_C51:
@@ -369,12 +452,15 @@ def select_action(state, action_space):
     return action
 
 # optimize
-if USE_QR_C51:
+if USE_IQN_C51:
+    X_ZERO_IQN_C51 = torch.zeros((args.Np_tau, BATCH_SIZE, args.N_tau), dtype=torch.float).to(device)
+elif USE_QR_C51:
     X_ZERO_QR_C51 = torch.zeros((QR_C51_atoms, BATCH_SIZE, QR_C51_atoms), dtype=torch.float).to(device)
 X_ZERO        = torch.zeros((BATCH_SIZE, 1), dtype=torch.float).to(device)
 def optimize_model():
     #
-    # F.smooth_l1_loss(x, x.zero(), reduction='none')
+    def huber(x, k=1.0):
+        return torch.where(x.abs() < k, 0.5 * x.pow(2), k * (x.abs() - 0.5 * k))
     def huber_loss_fast(x, xzero):
         # cond = (x.abs() < 1.0).float().detach()
         # return 0.5 * x.pow(2) * cond + (x.abs() - 0.5) * (1.0 - cond)
@@ -400,7 +486,49 @@ def optimize_model():
     reward_batch          = torch.cat(batch.reward).to(device)
     
     #
-    if USE_QR_C51:
+    if USE_IQN_C51:
+        IQN_C51_action = action_batch.unsqueeze(dim=-1).expand(-1, -1, args.N_tau)
+        IQN_C51_reward = reward_batch.view(-1, 1) # [32 x 1]
+        if USE_NOISY_NET:
+            policy_net.sample_noise()           
+        y, my_tau = policy_net(state_batch, args.N_tau)
+        quantiles = y.gather(1,    IQN_C51_action).squeeze(1)      # from [32 x 1 x 51] to [32 x 51]
+        quantiles_next = IQN_next_distribution(args, non_final_next_states, IQN_C51_reward, non_final_mask) # [32, 51]
+        #
+        # -----------Google Implementation -----------
+        # (1) Make target quantile to be [Batch x Np_tau x 1]
+        quantiles_next = quantiles_next.unsqueeze(-1)
+        # (2) Make current quantile to be [Batch x N_tau x 1]
+        quantiles      = quantiles.unsqueeze(-1)
+        # (3) Shape of bellman_erors and huber_loss: [Batch x Np_tau x N_tau x 1]
+        # 
+        # [Batch x Np_tau x None x 1] - [Batch x None x N_tau x 1]
+        diff = quantiles_next.unsqueeze(2) - quantiles.unsqueeze(1)
+        # (4) Huber Loss
+        huber_diff = huber(diff)
+        # (5) !!! # Reshape replay_quantiles to [Batch x N_tau x 1]
+        my_tau = my_tau.view(args.N_tau, y.shape[0], 1) # [N_tau x Batch x 1]
+        my_tau = my_tau.transpose(0, 1).contiguous()    # [Batch x N_tau x 1]
+        my_tau = my_tau.unsqueeze(1) # [Batch x Np_tau x N_tau x 1]
+        # ----------- -----------   
+        # (6) # Shape: batch_size x num_tau_prime_samples x num_tau_samples x 1.
+        loss = (huber_diff * (my_tau - (diff<0).float()).abs()) / 1.0 # Divided by kappa
+        # (7) 
+        # Sum over current quantile value (num_tau_samples) dimension,
+        # average over target quantile value (num_tau_prime_samples) dimension.
+        # [batch_size x Np_tau x N_tau x 1.]
+        loss = loss.squeeze(3).sum(-1).mean(-1)
+
+        if PRIORITIZED_MEMORY:
+            loss_PER = loss.detach().abs().cpu().numpy()         
+            if len(loss.shape) == 2:
+                batch_weight_IS = batch_weight_IS.view(BATCH_SIZE, 1)            
+            assert(len(loss.shape) == len(batch_weight_IS.shape))
+            loss = loss * batch_weight_IS    
+        loss = loss.mean()   
+        ds = y.detach() * 1.0 / y.size(1)
+        Q_sa = ds.sum(dim=2).gather(1, action_batch)    
+    elif USE_QR_C51:
         QR_C51_action = action_batch.unsqueeze(dim=-1).expand(-1, -1, QR_C51_atoms)
         QR_C51_reward = reward_batch.view(-1, 1) # [32 x 1]
         #
@@ -410,16 +538,37 @@ def optimize_model():
         quantiles     = y.gather(1, QR_C51_action)      # [32 x 1 x 51]
         quantiles     = quantiles.squeeze(1) # [32 x 51]
         #
-        quantiles_next = next_distribution(non_final_next_states, QR_C51_reward, non_final_mask) # [32, 51]
+        quantiles_next = next_distribution(          non_final_next_states, QR_C51_reward, non_final_mask) # [32, 51]
         #
-        #              [51 x 32 x 1 ]                [1, 32, 51]
-        diff = quantiles_next.t().unsqueeze(-1) - quantiles.unsqueeze(0) # diff is of shape [51, 32 51]
-        #loss = huber_loss(diff) * torch.abs( QR_C51_cum_density - (diff < 0).to(torch.float) )
-        loss = huber_loss_fast(diff, X_ZERO_QR_C51) * torch.abs( QR_C51_cum_density - (diff < 0).to(torch.float) )
-
-        # loss is now of shape [51, 32, 51]
-        loss = loss.transpose(0,1) # loss is now of shape [32, 51, 51]
-        loss = loss.mean(1).sum(-1)
+        # -----------Google Implementation -----------
+        # (1) Make target quantile to be [Batch x Np_tau x 1]
+        quantiles_next = quantiles_next.unsqueeze(-1)
+        # (2) Make current quantile to be [Batch x N_tau x 1]
+        quantiles      = quantiles.unsqueeze(-1)
+        # (3) Shape of bellman_erors and huber_loss: [Batch x Np_tau x N_tau x 1]
+        # 
+        # [Batch x Np_tau x None x 1] - [Batch x None x N_tau x 1]
+        diff = quantiles_next.unsqueeze(2) - quantiles.unsqueeze(1)
+        # (4) Huber Loss
+        huber_diff = huber(diff)
+        # ----------- -----------   
+        # (6) # Shape: batch_size x num_tau_prime_samples x num_tau_samples x 1.
+        loss = (huber_diff * (QR_C51_cum_density - (diff<0).float()).abs()) / 1.0 # Divided by kappa
+        # (7) 
+        # Sum over current quantile value (num_tau_samples) dimension,
+        # average over target quantile value (num_tau_prime_samples) dimension.
+        # [batch_size x Np_tau x N_tau x 1.]
+        loss = loss.squeeze(3).sum(-1).mean(-1)
+        # #              [51 x 32 x 1 ]                [1, 32, 51]
+        # diff = quantiles_next.t().unsqueeze(-1) - quantiles.unsqueeze(0) # diff is of shape [51, 32 51]
+        
+        # diff = diff.transpose(0, 1).contiguous()
+        # #loss = huber_loss_fast(diff, X_ZERO_QR_C51) * torch.abs( QR_C51_cum_density - (diff < 0).to(torch.float) )
+        # loss = huber(diff) * torch.abs( QR_C51_cum_density - (diff < 0).to(torch.float) )
+        # # loss is now of shape [51, 32, 51]
+        # #loss = loss.transpose(0,1).contiguous()
+        # loss = loss.mean(1).sum(-1)
+        
         if PRIORITIZED_MEMORY:
             loss_PER = loss.detach().abs().cpu().numpy()         
             if len(loss.shape) == 2:
@@ -496,15 +645,15 @@ def optimize_model():
             loss = F.smooth_l1_loss(Q_sa, Expected_Q_sa)                   
     # -------------------------------------------------------------------######
     if PRIORITIZED_MEMORY:
-        if USE_C51 or USE_QR_C51:
+        if USE_C51 or USE_QR_C51 or USE_IQN_C51:
             memory.update_priority_on_tree(batch_index, loss_PER)
         else:
             memory.update_priority_on_tree(batch_index, abs_TD_error)
     # -------------------------------------------------------------------######
     optimizer.zero_grad()
     loss.backward()
-    for param in policy_net.parameters():
-        param.grad.data.clamp_(-1, 1)
+    # for param in policy_net.parameters():
+    #    param.grad.data.clamp_(-1, 1)
     optimizer.step()
     # -------------------------------------------------------------------######
     Qval = Q_sa.cpu().detach().numpy().squeeze()

@@ -162,13 +162,18 @@ class C51(nn.Module):
         self.use_duel      = use_duel
         self.use_noisy_net = use_noisy_net
         self.use_qr_c51    = use_qr_c51
+
+
         init_ = lambda m: init(m, 
-                               nn.init.orthogonal_,
+                               nn.init.kaiming_uniform_,
                                lambda x: nn.init.constant_(x, 0), 
-                               nn.init.calculate_gain('relu'))
+                               nonlinearity='relu',
+                               mode='fan_in')
         init2_ = lambda m: init(m, 
-                               nn.init.orthogonal_,
-                               lambda x: nn.init.constant_(x, 0))        
+                               nn.init.kaiming_uniform_,
+                               lambda x: nn.init.constant_(x, 0), 
+                               nonlinearity='relu',
+                               mode='fan_in')        
 
 
         self.conv1 = init_(nn.Conv2d(num_inputs, 32, 8, stride=4))
@@ -180,7 +185,7 @@ class C51(nn.Module):
         else:
             Linear = nn.Linear
 
-        self.fc1 = Linear(32*7*7, hidden_size)
+        self.fc1 = Linear(32*7*7,      hidden_size)
         self.fc2 = Linear(hidden_size, num_actions*atoms)
     
         if self.use_duel:
@@ -216,7 +221,7 @@ class C51(nn.Module):
             if self.use_qr_c51:
                 y = duel
             else:
-                y = F.softmax(duel, dim = 2) # y is of shape [batch x action x atoms]             
+                y = F.log_softmax(duel, dim = 2).exp() # y is of shape [batch x action x atoms]             
         else:
             # A Tensor of shape [batch x actions x atoms].
             x = F.relu(self.fc1(x))
@@ -225,7 +230,7 @@ class C51(nn.Module):
             if self.use_qr_c51:
                 y = x_batch
             else:
-                y = F.softmax(x_batch, dim=2) # y is of shape [batch x action x atoms]            
+                y = F.log_softmax(x_batch, dim=2).exp() # y is of shape [batch x action x atoms]            
             
         return y
 
@@ -240,3 +245,106 @@ class C51(nn.Module):
                 self.fc1.sample_noise()
                 self.fc2.sample_noise()    
 
+class IQN_C51(nn.Module):
+    def __init__(self, num_inputs, hidden_size=512, num_actions=4, 
+                       use_duel=False, use_noisy_net=False):
+        super(IQN_C51, self).__init__()
+        self.num_actions   = num_actions
+        self.use_duel      = use_duel
+        self.use_noisy_net = use_noisy_net
+        self.quantile_embedding_dim = 64
+        self.pi = np.pi
+
+
+        init_ = lambda m: init(m, 
+                               nn.init.kaiming_uniform_,
+                               lambda x: nn.init.constant_(x, 0), 
+                               gain=nn.init.calculate_gain('relu'),
+                               mode='fan_in')
+        init2_ = lambda m: init(m, 
+                               nn.init.kaiming_uniform_,
+                               lambda x: nn.init.constant_(x, 0), 
+                               gain=nn.init.calculate_gain('relu'),
+                               mode='fan_in')        
+
+
+        self.conv1 = init_(nn.Conv2d(num_inputs, 32, 8, stride=4))
+        self.conv2 = init_(nn.Conv2d(32, 64, 4, stride=2))
+        self.conv3 = init_(nn.Conv2d(64, 32, 3, stride=1))    
+
+        if use_noisy_net:
+            Linear = NoisyLinear
+        else:
+            Linear = nn.Linear
+        # ----------------------------------------------------------------------------
+        # self.fc1 = Linear(32*7*7, hidden_size)
+        self.fc2 = Linear(hidden_size, num_actions*1)
+        # ----------------------------------------------------------------------------
+        Atari_Input = torch.FloatTensor(1, 4, 84, 84)
+        temp_fea    = self.conv3(self.conv2(self.conv1(Atari_Input)))
+        temp_fea    = temp_fea.view(temp_fea.size(0), -1)
+        state_net_size = temp_fea.size(1)
+        del Atari_Input
+        del temp_fea
+
+        self.quantile_fc0 = nn.Linear(self.quantile_embedding_dim, state_net_size)
+        self.quantile_fc1 = nn.Linear(state_net_size, hidden_size)
+        # ----------------------------------------------------------------------------
+        if self.use_duel:
+            self.quantile_fc_value  = Linear(hidden_size, 1)
+
+        # Param init
+        if not use_noisy_net:
+            self.quantile_fc0 = init2_(self.quantile_fc0)
+            self.quantile_fc1 = init2_(self.quantile_fc1)
+            self.fc2 = init2_(self.fc2)
+            if self.use_duel:
+                self.quantile_fc_value = init2_(self.quantile_fc_value)
+
+
+    def forward(self, x, num_quantiles):
+        x = x / 255.0
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = x.view(x.size(0), -1)
+        
+        BATCH_SIZE = x.size(0)
+        state_net_size = x.size(1)
+
+        tau = torch.FloatTensor(BATCH_SIZE * num_quantiles, 1).to(x)
+        _ = tau.uniform_(0, 1)
+        quantile_net = torch.FloatTensor([i for i in range(self.quantile_embedding_dim)]).to(x)
+        cos_tau      = torch.cos(quantile_net * self.pi * tau)
+        out          = F.relu(self.quantile_fc0(cos_tau))
+        fea_tile     = torch.cat([x]*num_quantiles, dim=0)
+        combined_fea = F.relu(self.quantile_fc1(out*fea_tile)) # (batch*atoms, 512)
+
+        if self.use_duel:
+            values   = self.quantile_fc_value(combined_fea) # from batch x atoms to batch x 1 x atoms
+            values   = values.view(-1, 1, num_quantiles)
+
+            x        = self.fc2(combined_fea)
+            x_batch  = x.view(-1, num_quantiles, self.num_actions)
+            # After transpose, x_batch becomes [batch x actions x atoms]
+            x_batch  = x_batch.transpose(1, 2).contiguous()
+            action_component = x_batch - x_batch.mean(1, keepdim=True)
+
+            duel_y = values + action_component
+            y      = duel_y
+        else:
+            x = self.fc2(combined_fea)
+            #           [batch x atoms x actions].
+            y = x.view(-1, num_quantiles, self.num_actions)    
+            # output should be # A Tensor of shape [batch x actions x atoms].
+            y = y.transpose(1, 2).contiguous()
+        # ------------------------------------------------------------------------------------------------ #
+        return y, tau # [batch x actions x atoms]
+
+    def sample_noise(self):
+        if self.use_noisy_net:
+            if self.use_duel:
+                self.fc2.sample_noise()
+                self.quantile_fc_value.sample_noise()
+            else:
+                self.fc2.sample_noise()

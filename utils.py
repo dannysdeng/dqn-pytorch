@@ -5,8 +5,11 @@ import torch.nn as nn
 import numpy as np
 import math
 
-def init(module, weight_init, bias_init, gain=1):
-    weight_init(module.weight.data, gain=gain)
+def init(module, weight_init, bias_init, gain=1, mode=None, nonlinearity='relu'):
+    if mode is not None:
+        weight_init(module.weight.data, mode=mode, nonlinearity=nonlinearity)
+    else:
+        weight_init(module.weight.data, gain=gain)
     bias_init(module.bias.data)
     return module
 
