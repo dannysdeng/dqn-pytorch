@@ -61,6 +61,8 @@ parser.add_argument('--num-processes', type=int, default=1,
                     help='num processes (default: 1)')
 parser.add_argument('--gamma', type=int, default=0.99,
                     help='discount factor gamma (default 0.99)')
+parser.add_argument('--kappa', type=float, default=1.0,
+                    help='discount factor gamma (default 0.99)')
 parser.add_argument('--add-timestep', action='store_true', default=False,
                     help='add timestep to observations')
 parser.add_argument('--no-cuda', action='store_true', default=False,
@@ -185,6 +187,7 @@ if USE_C51:
         # tau
         QR_C51_cum_density = (2 * np.arange(QR_C51_atoms) + 1) / (2.0 * QR_C51_atoms)
         QR_C51_cum_density =  torch.tensor(QR_C51_cum_density, device=device, dtype=torch.float).view(1, 1, -1, 1)
+        QR_C51_cum_density = QR_C51_cum_density.expand(args.batch_size, QR_C51_atoms, QR_C51_atoms, -1)
         if USE_IQN_C51:
             C51_atoms    = None
             QR_C51_atoms = None
@@ -319,7 +322,7 @@ def IQN_next_distribution(args, non_final_next_states, batch_reward, non_final_m
         quantiles_next[non_final_mask]     = next_y.gather(1,     max_next_action).squeeze(1)         
         # output should change from [32 x 1 x 51] --> [32 x 51]
         # batch_reward should be of size [32 x 1]
-        quantiles_next     = batch_reward     + (GAMMA**NUM_LOOKAHEAD) * quantiles_next
+        quantiles_next     = batch_reward.expand(-1, quantiles_next.size(1))  + (GAMMA**NUM_LOOKAHEAD) * quantiles_next
     return quantiles_next.detach()
 
 def next_distribution(non_final_next_states, batch_reward, non_final_mask):
@@ -491,8 +494,8 @@ def optimize_model():
         IQN_C51_reward = reward_batch.view(-1, 1) # [32 x 1]
         if USE_NOISY_NET:
             policy_net.sample_noise()           
-        y, my_tau = policy_net(state_batch, args.N_tau)
-        quantiles = y.gather(1,    IQN_C51_action).squeeze(1)      # from [32 x 1 x 51] to [32 x 51]
+        y, my_tau      = policy_net(state_batch, args.N_tau)
+        quantiles      = y.gather(1,    IQN_C51_action).squeeze(1)      # from [32 x 1 x 51] to [32 x 51]
         quantiles_next = IQN_next_distribution(args, non_final_next_states, IQN_C51_reward, non_final_mask) # [32, 51]
         #
         # -----------Google Implementation -----------
@@ -505,14 +508,15 @@ def optimize_model():
         # [Batch x Np_tau x None x 1] - [Batch x None x N_tau x 1]
         diff = quantiles_next.unsqueeze(2) - quantiles.unsqueeze(1)
         # (4) Huber Loss
-        huber_diff = huber(diff)
+        huber_diff = huber(diff, args.kappa)
         # (5) !!! # Reshape replay_quantiles to [Batch x N_tau x 1]
-        my_tau = my_tau.view(args.N_tau, y.shape[0], 1) # [N_tau x Batch x 1]
-        my_tau = my_tau.transpose(0, 1).contiguous()    # [Batch x N_tau x 1]
-        my_tau = my_tau.unsqueeze(1) # [Batch x Np_tau x N_tau x 1]
+        my_tau = my_tau.view(y.shape[0], args.N_tau, 1)   # [N_tau x Batch x 1]
+        # my_tau = my_tau.transpose(0, 1).contiguous()    # [Batch x N_tau x 1]
+        my_tau = my_tau.unsqueeze(1) # [Batch x 1 x N_tau x 1]
+        my_tau = my_tau.expand(-1, args.Np_tau, -1, -1) # [Batch x Np_tau x N_tau x 1]
         # ----------- -----------   
         # (6) # Shape: batch_size x num_tau_prime_samples x num_tau_samples x 1.
-        loss = (huber_diff * (my_tau - (diff<0).float()).abs()) / 1.0 # Divided by kappa
+        loss = (huber_diff * (my_tau - (diff<0).float()).abs()) / args.kappa # Divided by kappa
         # (7) 
         # Sum over current quantile value (num_tau_samples) dimension,
         # average over target quantile value (num_tau_prime_samples) dimension.
@@ -561,14 +565,7 @@ def optimize_model():
         loss = loss.squeeze(3).sum(-1).mean(-1)
         # #              [51 x 32 x 1 ]                [1, 32, 51]
         # diff = quantiles_next.t().unsqueeze(-1) - quantiles.unsqueeze(0) # diff is of shape [51, 32 51]
-        
-        # diff = diff.transpose(0, 1).contiguous()
-        # #loss = huber_loss_fast(diff, X_ZERO_QR_C51) * torch.abs( QR_C51_cum_density - (diff < 0).to(torch.float) )
-        # loss = huber(diff) * torch.abs( QR_C51_cum_density - (diff < 0).to(torch.float) )
-        # # loss is now of shape [51, 32, 51]
-        # #loss = loss.transpose(0,1).contiguous()
-        # loss = loss.mean(1).sum(-1)
-        
+                
         if PRIORITIZED_MEMORY:
             loss_PER = loss.detach().abs().cpu().numpy()         
             if len(loss.shape) == 2:

@@ -280,7 +280,7 @@ class IQN_C51(nn.Module):
         # self.fc1 = Linear(32*7*7, hidden_size)
         self.fc2 = Linear(hidden_size, num_actions*1)
         # ----------------------------------------------------------------------------
-        Atari_Input = torch.FloatTensor(1, 4, 84, 84)
+        Atari_Input = torch.FloatTensor(1, num_inputs, 84, 84)
         temp_fea    = self.conv3(self.conv2(self.conv1(Atari_Input)))
         temp_fea    = temp_fea.view(temp_fea.size(0), -1)
         state_net_size = temp_fea.size(1)
