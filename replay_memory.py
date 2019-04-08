@@ -3,24 +3,83 @@ import random
 import numpy as np
 from utils import SumTree
 from utils import SumSegmentTree, MinSegmentTree
+from multiprocessing import Pool, Manager
+
+import torch
 
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 class ReplayMemory(object):
-    def __init__(self, capacity):
+    def __init__(self, capacity, low_footprint=False, num_workers=1):
         self.capacity = capacity
         self.memory = []
         self.position = 0
+        self.low_footprint = low_footprint
+        self.index_list = list(range(capacity))
+        self.num_workers = num_workers
+        if self.low_footprint and self.num_workers > 1:
+            raise NotImplementedError('Multi processing for replay not implemented')
+            self.pool   = Pool(processes=num_workers)
+            # self.manager = Manager()
+            # self.memory = self.manager.list()
+
+    def _get_transition(self, index):
+        tran = self.memory[index]
+        s0, a, s1, r = tran.state, tran.action, tran.next_state, tran.reward
+
+        state_list = []
+        next_state_list = []
+        for i in range(3, 0, -1):
+            prev_tran = self.memory[index-i]
+            s0_prev, s1_prev = prev_tran.state, prev_tran.next_state
+            state_list.append(s0_prev)
+            next_state_list.append(s1_prev)
+        # -----------------------------------------
+        state_list.append(s0)
+        next_state_list.append(s1)
+        # -----------------------------------------
+        state      = torch.cat(state_list, dim=1)      # from [1 x 1 x 84 x 84] to [1 x 4 x 84 x 84]
+        next_state = torch.cat(state_list, dim=1) # from [1 x 1 x 84 x 84] to [1 x 4 x 84 x 84]
+        return Transition(state, a, next_state, r)     
 
     # args is like def push(self, state, action, next_state, reward), 
     # So Transition(state, action, next_state, reward) becomes what we need to store
     def push(self, *args):
+        # ------------------------------------------------------
         if len(self.memory) < self.capacity:
-            self.memory.append(None)
-        self.memory[self.position] = Transition(*args)
+            self.memory.append(None)        
+        # ------------------------------------------------------
+        if self.low_footprint:
+            # Only store the next frame
+            state, action, next_state, reward = args
+            self.memory[self.position] = Transition(state[:, -1, :, :], 
+                                                    action, 
+                                                    next_state[:, -1, :, :],
+                                                    reward)
+        else:
+            self.memory[self.position] = Transition(*args)
+        # ------------------------------------------------------
         self.position = (self.position + 1) % self.capacity
-
+        # ------------------------------------------------------
     def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
+        if self.low_footprint:
+            output_batch = []
+            out_index = random.sample(self.index_list[3:len(self.memory)], batch_size)
+            if self.num_workers > 1:
+                raise NotImplementedError('Multi processing for replay not implemented')
+                temp = []
+                for index in out_index:
+                    temp.append(self.pool.apply_async(self._get_transition, index))
+                self.pool.close()
+                self.pool.join()
+                for i in range(len(out_index)):
+                    output_batch.append(temp[i].get())
+            else:
+                for index in out_index:
+                   this_transition = self._get_transition(index)
+                   output_batch.append(this_transition)
+            return output_batch
+        else:
+            return random.sample(self.memory, batch_size)
 
     def __len__(self):
         return len(self.memory)

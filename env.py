@@ -123,7 +123,8 @@ class VecPyTorchFrameStack(VecEnvWrapper):
     def step_wait(self):
         obs, rewards, dones, infos = self.venv.step_wait()
         # This is stacking 4 frames together
-        # self.stacked_obs[:, :-1] is everything (first 3) except the last one, self.stacked_obs[:, -1:] is everything (last 3) except the first one
+        # self.stacked_obs[:, :-1] is everything (first 3) except the last one, 
+        # self.stacked_obs[:, -1:] is everything (last 3) except the first one
         self.stacked_obs[:, :-self.shape_dim0] = self.stacked_obs[:, self.shape_dim0:] # essentially pops the first 1 out
         for i, done in enumerate(dones):
             if done:
