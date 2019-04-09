@@ -18,9 +18,6 @@ class ReplayMemory(object):
         self.num_workers = num_workers
         if self.low_footprint and self.num_workers > 1:
             raise NotImplementedError('Multi processing for replay not implemented')
-            self.pool   = Pool(processes=num_workers)
-            # self.manager = Manager()
-            # self.memory = self.manager.list()
 
     def _get_transition(self, index):
         tran = self.memory[index]
@@ -49,7 +46,7 @@ class ReplayMemory(object):
             self.memory.append(None)        
         # ------------------------------------------------------
         if self.low_footprint:
-            # Only store the next frame
+            # Only store the latest frame
             state, action, next_state, reward = args
             self.memory[self.position] = Transition(state[:, -1, :, :], 
                                                     action, 
@@ -62,21 +59,8 @@ class ReplayMemory(object):
         # ------------------------------------------------------
     def sample(self, batch_size):
         if self.low_footprint:
-            output_batch = []
             out_index = random.sample(self.index_list[3:len(self.memory)], batch_size)
-            if self.num_workers > 1:
-                raise NotImplementedError('Multi processing for replay not implemented')
-                temp = []
-                for index in out_index:
-                    temp.append(self.pool.apply_async(self._get_transition, index))
-                self.pool.close()
-                self.pool.join()
-                for i in range(len(out_index)):
-                    output_batch.append(temp[i].get())
-            else:
-                for index in out_index:
-                   this_transition = self._get_transition(index)
-                   output_batch.append(this_transition)
+            output_batch = [self._get_transition(index) for index in out_index]
             return output_batch
         else:
             return random.sample(self.memory, batch_size)

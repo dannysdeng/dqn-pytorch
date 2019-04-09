@@ -18,7 +18,6 @@ def init_normc_(weight, gain=1):
     weight.normal_(0, 1)
     weight *= gain / torch.sqrt(weight.pow(2).sum(1, keepdim=True))    
 
-
 class SegmentTree(object):
     def __init__(self, capacity, operation, neutral_element):
         """Build a Segment Tree data structure.
