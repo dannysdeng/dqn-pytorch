@@ -59,7 +59,14 @@ class ReplayMemory(object):
         # ------------------------------------------------------
     def sample(self, batch_size):
         if self.low_footprint:
-            out_index = random.sample(self.index_list[3:len(self.memory)], batch_size)
+            if len(self.memory) < self.capacity:
+                valid_range = self.index_list[4:len(self.memory)]
+            else:
+                if self.position <= 10:
+                    valid_range = self.index_list[self.position+1+4:]
+                else:
+                    valid_range = self.index_list[4:self.position] + self.index_list[self.position+1+4:]
+            out_index = random.sample(valid_range, batch_size)
             output_batch = [self._get_transition(index) for index in out_index]
             return output_batch
         else:
