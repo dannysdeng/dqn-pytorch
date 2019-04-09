@@ -7,7 +7,9 @@ Run the codes with
 
 A few notes (Bug might exist): 
 
-   1. Testing results for 10M is shown in Figure 1. The comparisons are for "Double-DQN + C51", "Double-DQN + QR-C200" and "IQN-64-64-32".
+   1. Testing results for 10M is shown in Figure 1. 
+   
+      The comparisons are for "DDQN + C51", "DDQN + QR-C200" and "DDQN + IQN-64-64-32".
    
    2. Rainbow in this repo runs kinda slow on my machine (_TITAN Xp with Intel(R) Xeon(R) CPU E5-2650 v4 @ 2.20GHz_). It only reached 75 FPS  when using a prioritized memory of size 50,000 on the game _Spaceinvaders_, so it seems that it may not be able to finish 200M within 10 days. (Could be because of the sub-optimal way that is used for pushing new transitions into the PER buffer.)
      
