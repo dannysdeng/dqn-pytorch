@@ -14,7 +14,9 @@ A few notes (Bug might exist):
    2. Rainbow in this repo runs kinda slow on my machine (_TITAN Xp with Intel(R) Xeon(R) CPU E5-2650 v4 @ 2.20GHz_). It only reached 75 FPS  when using a prioritized memory of size 50,000 on the game _Spaceinvaders_, so it seems that it may not be able to finish 200M within 10 days. (Could be because of the sub-optimal way that is used for pushing new transitions into the PER buffer.)
      
 [Figure 1]
-![alt text](https://raw.githubusercontent.com/dannysdeng/dqn-pytorch/master/test.png)
+![alt text](https://raw.githubusercontent.com/dannysdeng/dqn-pytorch/master/demo_result/assault.png)
+![alt text](https://raw.githubusercontent.com/dannysdeng/dqn-pytorch/master/demo_result/mspacman.png)
+![alt text](https://raw.githubusercontent.com/dannysdeng/dqn-pytorch/master/demo_result/robotank.png)
 
 Useful references:
 
