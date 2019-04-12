@@ -47,7 +47,7 @@ class ReplayMemory(object):
         s0, a, s1, r = tran.state, tran.action, tran.next_state, tran.reward
         #
         state_list      = [s0]
-        next_state_list = [s1]
+        next_state_list = [s1] # s1 will be None if it is a terminal state
         #
         for i in range(1, 3+1):
             prev_tran = self.memory[index-i]
@@ -60,15 +60,17 @@ class ReplayMemory(object):
         state_list      = state_list[::-1]
         next_state_list = next_state_list[::-1]
         # -----------------------------------------
-        if len(next_state_list) < 4:
+        if s1 is not None and len(next_state_list) < 4:
             next_state_list = [state_list[0]] + next_state_list
-            next_state_list = [torch.zeros_like(s0)] * (4-len(next_state_list)) + next_state_list
+            if len(next_state_list) < 4:
+                next_state_list = [torch.zeros_like(s0)] * (4-len(next_state_list)) + next_state_list
 
         if len(state_list) < 4:
             state_list = [torch.zeros_like(s0)] * (4 - len(state_list)) + state_list
+
         # -----------------------------------------
         state      = torch.cat(state_list, dim=1)      # from [1 x 1 x 84 x 84] to [1 x 4 x 84 x 84]
-        next_state = torch.cat(next_state_list, dim=1) # from [1 x 1 x 84 x 84] to [1 x 4 x 84 x 84]
+        next_state = torch.cat(next_state_list, dim=1) if s1 is not None else None # from [1 x 1 x 84 x 84] to [1 x 4 x 84 x 84]
         return Transition(state, a, next_state, r)     
 
     # args is like def push(self, state, action, next_state, reward), 
