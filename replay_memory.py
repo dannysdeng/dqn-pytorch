@@ -20,22 +20,55 @@ class ReplayMemory(object):
             raise NotImplementedError('Multi processing for replay not implemented')
 
     def _get_transition(self, index):
+        """
+        For low-footprint. Need to check whether a transition is valid.
+            e.g., if next_state is None, it means that it is an end.
+            So it could be: 
+                [Zero, Zero, s_{t-1}, s_{t}]
+            or:
+                [Zero, s_{t-2}, s_{t-1}, s_{t}]
+
+        Case 1: 
+            A memory item is not valid because it is overridden.
+            [s1, s2, s3, s4, ..., sN-1, sN]     --> s1 is not valid  
+            [sN+1, s2, s3, s4, ..., sN-1, sN]   --> s2 to s4 is not valid, cuz s1 is removed
+            [sN+1, sN+2, s3, s4, ..., sN-1, sN] --> s3 to s6 is not valid, cuz s2 is removed
+
+        Case 2:
+            A memory item needs to be concated zeros, because it is an early met terminal state
+            [s1, s2_T, s3, s4, ..., sN-1, sN] --> s2_T is valid, but needs to be cat [Zero, Zero, s1, s2_T]
+
+            [sN+1, s2_T, s3, s4, ..., sN-1, sN] --> s2_T is not valid, cuz s1 is removed
+
+            [sN+1, sN+2, s3, s4_T, ..., sN-1, sN] --> s4_T should be valid. As we can do [Zero, Zero, s3, s4_T]
+
+        """
         tran = self.memory[index]
         s0, a, s1, r = tran.state, tran.action, tran.next_state, tran.reward
-
-        state_list = []
-        next_state_list = []
-        for i in range(3, 0, -1):
+        #
+        state_list      = [s0]
+        next_state_list = [s1]
+        #
+        for i in range(1, 3+1):
             prev_tran = self.memory[index-i]
             s0_prev, s1_prev = prev_tran.state, prev_tran.next_state
+            if s1_prev is None:
+                break
             state_list.append(s0_prev)
             next_state_list.append(s1_prev)
+        #
+        state_list      = state_list[::-1]
+        next_state_list = next_state_list[::-1]
         # -----------------------------------------
-        state_list.append(s0)
-        next_state_list.append(s1)
+        if len(next_state_list) < 4:
+            next_state_list = [state_list[0]] + next_state_list
+            next_state_list = [torch.zeros_like(s0)] * (4-len(next_state_list)) + next_state_list
+
+        if len(state_list) < 4:
+            state_list = [torch.zeros_like(s0)] * (4 - len(state_list)) + state_list
         # -----------------------------------------
         state      = torch.cat(state_list, dim=1)      # from [1 x 1 x 84 x 84] to [1 x 4 x 84 x 84]
-        next_state = torch.cat(state_list, dim=1) # from [1 x 1 x 84 x 84] to [1 x 4 x 84 x 84]
+        next_state = torch.cat(next_state_list, dim=1) # from [1 x 1 x 84 x 84] to [1 x 4 x 84 x 84]
         return Transition(state, a, next_state, r)     
 
     # args is like def push(self, state, action, next_state, reward), 
@@ -48,10 +81,16 @@ class ReplayMemory(object):
         if self.low_footprint:
             # Only store the latest frame
             state, action, next_state, reward = args
-            self.memory[self.position] = Transition(state[:, -1, :, :], 
-                                                    action, 
-                                                    next_state[:, -1, :, :],
-                                                    reward)
+            if next_state is not None:
+                self.memory[self.position] = Transition(state[:, -1:, :, :].cpu(), 
+                                                        action.cpu(), 
+                                                        next_state[:, -1:, :, :].cpu(),
+                                                        reward.cpu())
+            else:
+                self.memory[self.position] = Transition(state[:, -1:, :, :].cpu(), 
+                                                        action.cpu(), 
+                                                        None,
+                                                        reward.cpu())                
         else:
             self.memory[self.position] = Transition(*args)
         # ------------------------------------------------------
@@ -60,14 +99,21 @@ class ReplayMemory(object):
     def sample(self, batch_size):
         if self.low_footprint:
             if len(self.memory) < self.capacity:
-                valid_range = self.index_list[4:len(self.memory)]
+                valid_range = self.index_list[3:len(self.memory)]
             else:
-                if self.position <= 10:
-                    valid_range = self.index_list[self.position+1+4:]
+                if self.position <= 3:
+                    valid_range = self.index_list[self.position+3:]
                 else:
-                    valid_range = self.index_list[4:self.position] + self.index_list[self.position+1+4:]
-            out_index = random.sample(valid_range, batch_size)
-            output_batch = [self._get_transition(index) for index in out_index]
+                    valid_range = self.index_list[3:self.position] + self.index_list[self.position+3:]
+            output_batch = []
+            while len(output_batch) < batch_size:
+                out_index = random.sample(valid_range, batch_size)
+                for index in out_index:
+                    this_one = self._get_transition(index)
+                    if this_one is not None:
+                        output_batch.append(this_one)
+                    if len(output_batch) == batch_size:
+                        break
             return output_batch
         else:
             return random.sample(self.memory, batch_size)

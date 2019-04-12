@@ -104,6 +104,9 @@ parser.add_argument('--use-QR-C51', action='store_true', default=False,
 parser.add_argument('--use-IQN-C51', action='store_true', default=False,
                     help='use Inverse Quantile Network')
 
+parser.add_argument('--use_low_footprint', action='store_true', default=False,
+                    help='use Inverse Quantile Network')
+
 parser.add_argument('--N_tau', type=int, default=64,
                     help='Paper N')
 parser.add_argument('--Np_tau', type=int, default=64,
@@ -125,6 +128,7 @@ BATCH_SIZE    = args.batch_size
 TRAIN_FREQ    = args.train_freq
 TARGET_UPDATE         = args.target_update #
 
+LOW_FOOTPRINT      = args.use_low_footprint
 # Q-Learning Parameters
 DOUBLE_Q_LEARNING  = args.use_double_dqn         #False
 PRIORITIZED_MEMORY = args.use_prioritized_buffer #False
@@ -135,6 +139,7 @@ USE_NOISY_NET      = args.use_noisy_net
 USE_C51            = args.use_C51
 USE_QR_C51         = args.use_QR_C51
 USE_IQN_C51        = args.use_IQN_C51
+
 
 if USE_IQN_C51:
     assert(USE_QR_C51 is True)
@@ -157,6 +162,7 @@ else:
 # --------------------------------------------------- #
 # Booking Keeping
 print_now('------- Begin DQN with --------')
+print_now('Using Low Footprint memory:      {}'.format(LOW_FOOTPRINT))
 print_now('Using Double DQN:                {}'.format(DOUBLE_Q_LEARNING))
 print_now('Using Prioritized buffer:        {}'.format(PRIORITIZED_MEMORY))
 print_now('Using N-step reward with N = {}:  {}'.format(NUM_LOOKAHEAD, USE_N_STEP))
@@ -261,7 +267,7 @@ optimizer = optim.Adam(policy_net.parameters(), lr=adam_lr, eps=adam_eps)
 if PRIORITIZED_MEMORY:
     memory    = PrioritizedReplayBuffer(args.memory_size, args.total_timestep, args.learning_starts)
 else:
-    memory    = ReplayMemory(args.memory_size)
+    memory    = ReplayMemory(args.memory_size, low_footprint=LOW_FOOTPRINT)
 
 nstep_buffer = []
 def n_step_preprocess(st_0, action, st_1, reward, done):
