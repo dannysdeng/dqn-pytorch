@@ -16,7 +16,7 @@ A few notes (Bug might exist):
 [Figure 1]
 ![alt text](https://raw.githubusercontent.com/dannysdeng/dqn-pytorch/master/demo_result/assault.png)
 ![alt text](https://raw.githubusercontent.com/dannysdeng/dqn-pytorch/master/demo_result/mspacman.png)
-![alt text](https://raw.githubusercontent.com/dannysdeng/dqn-pytorch/master/demo_result/robotank.png)
+![alt text](https://raw.githubusercontent.com/dannysdeng/dqn-pytorch/master/demo_result/robotank_100M.png)
 
 Useful references:
 
