@@ -1,5 +1,5 @@
 # dqn-pytorch
-Towards learning Rainbow-DQN and all that good stuffs.
+Towards learning Rainbow-DQN and all that good stuffs in pytorch.
 
 Run the codes with
 
